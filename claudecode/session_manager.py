@@ -58,7 +58,7 @@ class OpenCodeSessionManager:
             raise ValueError(f"Repository path does not exist: {repo_abs_path}")
 
         cmd =[
-            "opencode.cmd", "serve"
+            "opencode", "serve"
         ]
         
         logger.info(f"Starting Opencode server in background: {' '.join(cmd)}")
