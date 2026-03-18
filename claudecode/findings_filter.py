@@ -165,7 +165,7 @@ class HardExclusionRules:
 
 
 class FindingAnalyzer:
-    """分析单个安全发现的类，使用OpenCodeSessionManager进行大模型调用"""
+    """分析安全发现集合的类，使用OpenCodeSessionManager进行大模型调用"""
     
     def __init__(self, 
                  session_manager: OpenCodeSessionManager,
@@ -201,6 +201,24 @@ class FindingAnalyzer:
         Returns:
             元组（成功，分析结果，错误消息）
         """
+        # 兼容旧接口：单条分析统一走批量过滤实现，避免双实现分叉。
+        success, batch_result, error_msg = self.analyze_findings_batch(
+            findings=[finding],
+            pr_context=pr_context,
+            custom_filtering_instructions=custom_filtering_instructions,
+        )
+
+        if not success or not isinstance(batch_result, dict):
+            return False, {}, error_msg
+
+        decisions = batch_result.get("finding_decisions", [])
+        if isinstance(decisions, list) and decisions:
+            first = decisions[0]
+            if isinstance(first, dict):
+                return True, first, ""
+
+        return False, {}, "批量过滤未返回单条决策"
+
         try:
             logger.info("\\n" + "=" * 60)
             logger.info("开始分析单个安全发现")
@@ -364,23 +382,7 @@ PR上下文:
 - 描述: {(pr_context.get('description') or '无描述')[:500]}...
 """
         
-        # Get file content if available
-        file_path = finding.get('file', '')
         file_content = ""
-        if file_path:
-            success, content, error = self._read_file(file_path)
-            if success:
-                file_content = f"""
-  
-文件内容 ({file_path}):
-```
-{content}
-```"""
-            else:
-                file_content = f"""
-  
-文件内容 ({file_path}): 读取文件错误 - {error}
-"""
         
         finding_json = json.dumps(finding, indent=2)
         
@@ -457,48 +459,154 @@ PR上下文:
   "justification": "清晰的SQL注入漏洞，具有具体利用路径"
 }}"""
     
-    def _read_file(self, file_path: str) -> Tuple[bool, str, str]:
-        """读取文件并用行号格式化。
-        
-        Args:
-            file_path: 要读取的文件的路径
-            
-        Returns:
-            元组（成功，格式化内容，错误消息）
-        """
+    def analyze_findings_batch(self,
+                               findings: List[Dict[str, Any]],
+                               pr_context: Optional[Dict[str, Any]] = None,
+                               custom_filtering_instructions: Optional[str] = None) -> Tuple[bool, Dict[str, Any], str]:
+        """批量分析安全发现，返回逐条过滤决策。"""
+        if not findings:
+            return True, {"finding_decisions": [], "analysis_summary": {"total_input_findings": 0}}, ""
+
+        call_id = f"filter_findings_{len(findings)}"
+
         try:
-            # 检查是否设置了REPO_PATH并将其用作基本路径
-            repo_path = os.environ.get('REPO_PATH')
-            if repo_path:
-                # 将file_path转换为Path并检查是否为绝对路径
-                path = Path(file_path)
-                if not path.is_absolute():
-                    # 使其相对于REPO_PATH
-                    path = Path(repo_path) / file_path
-            else:
-                path = Path(file_path)
-            
-            if not path.exists():
-                return False, "", f"文件未找到：{path}"
-            
-            if not path.is_file():
-                return False, "", f"路径不是文件：{path}"
-            
-            # 使用错误处理机制读取文件以处理编码问题
-            try:
-                with open(path, 'r', encoding='utf-8') as f:
-                    content = f.read()
-            except UnicodeDecodeError:
-                # 使用latin-1编码作为后备
-                with open(path, 'r', encoding='latin-1') as f:
-                    content = f.read()
-            
-            return True, content, ""
-            
+            prompt = self._generate_batch_findings_prompt(findings, pr_context, custom_filtering_instructions)
+            system_prompt = self._generate_system_prompt()
+            self.output_manager.save_text(
+                f"{call_id}_prompt.txt",
+                f"系统提示词:\n{system_prompt}\n\n用户提示词:\n{prompt}"
+            )
+
+            response_data = self.session_manager.send_message(prompt, system_prompt)
+            response_text = ""
+            if isinstance(response_data, dict) and 'parts' in response_data:
+                for part in response_data['parts']:
+                    if part.get('type') == 'text':
+                        response_text += part.get('text', '')
+
+            self.output_manager.save_json(
+                f"{call_id}_response.json",
+                {"final_response_text": response_text, "raw_response": response_data}
+            )
+
+            if not response_text:
+                return False, {}, "响应文本为空"
+
+            success, analysis_result = parse_json_with_fallbacks(response_text, "OpenCode批量过滤响应")
+            if not success or not isinstance(analysis_result, dict):
+                self.output_manager.save_json(
+                    f"{call_id}_parse_error.json",
+                    {
+                        "analysis_id": call_id,
+                        "error": "无法解析JSON响应",
+                        "raw_response": response_text,
+                        "input_findings_count": len(findings)
+                    }
+                )
+                return False, {}, "无法解析JSON响应"
+
+            self.output_manager.save_json(
+                f"{call_id}_result.json",
+                {
+                    **analysis_result,
+                    "analysis_id": call_id,
+                    "input_findings_count": len(findings),
+                    "analysis_timestamp": datetime.now().isoformat(),
+                    "pr_context": pr_context,
+                    "custom_filtering_instructions": custom_filtering_instructions,
+                }
+            )
+            return True, analysis_result, ""
+
         except Exception as e:
-            error_msg = f"读取文件 {file_path} 时出错：{str(e)}"
-            logger.error(error_msg)
-            return False, "", error_msg
+            logger.exception(f"批量安全发现分析过程中出错：{str(e)}")
+            self.output_manager.save_json(
+                f"{call_id}_error.json",
+                {
+                    "analysis_id": call_id,
+                    "error": str(e),
+                    "exception_type": type(e).__name__,
+                    "input_findings_count": len(findings),
+                    "pr_context": pr_context,
+                }
+            )
+            return False, {}, str(e)
+
+    def _generate_batch_findings_prompt(self,
+                                        findings: List[Dict[str, Any]],
+                                        pr_context: Optional[Dict[str, Any]] = None,
+                                        custom_filtering_instructions: Optional[str] = None) -> str:
+        """生成用于批量分析安全发现的提示词。"""
+        pr_info = ""
+        if pr_context and isinstance(pr_context, dict):
+            pr_info = f"""
+PR上下文:
+- 仓库: {pr_context.get('repo_name', 'unknown')}
+- PR #{pr_context.get('pr_number', 'unknown')}
+- 标题: {pr_context.get('title', 'unknown')}
+- 描述: {(pr_context.get('description') or '无描述')[:500]}...
+"""
+
+        indexed_findings = [
+            {
+                "finding_index": index,
+                "file": finding.get("file", ""),
+                "line": finding.get("line", 0),
+                "severity": finding.get("severity", ""),
+                "category": finding.get("category", finding.get("defect_type", "")),
+                "description": finding.get("description", ""),
+                "title": finding.get("title", ""),
+                "module_name": finding.get("module_name", ""),
+                "exploit_scenario": finding.get("exploit_scenario", ""),
+                "recommendation": finding.get("recommendation", ""),
+            }
+            for index, finding in enumerate(findings)
+        ]
+        findings_json = json.dumps(indexed_findings, ensure_ascii=False, indent=2)
+
+        filtering_section = custom_filtering_instructions or """硬性排除规则：过滤DoS、速率限制、资源耗尽、仅理论问题、与实际运行边界无关的问题；仅保留具备明确攻击路径和可操作修复建议的发现。"""
+
+        return f"""我需要你批量分析来自自动化代码审计的安全发现，并确定哪些应被过滤。
+
+{pr_info}
+
+输入说明：
+- 每条发现都包含 file 路径和 line 信息。
+- 你必须根据这些路径自行查找相关文件、上下文与调用链后再判断。
+- 不要依赖我手工提供文件内容；请基于代码库真实上下文做决定。
+
+{filtering_section}
+
+分配1-10的置信度评分：
+- 1-3：低置信度，可能是误报或噪音
+- 4-6：中等置信度，需要进一步调查
+- 7-10：高置信度，可能是真正的漏洞
+
+要分析的安全发现列表：
+```json
+{findings_json}
+```
+
+必须严格按照以下JSON结构回答（不要使用Markdown，不要使用代码块）：
+{{
+  "finding_decisions": [
+    {{
+      "finding_index": 0,
+      "keep_finding": true,
+      "confidence_score": 8,
+      "exclusion_reason": null,
+      "justification": "清晰的SQL注入漏洞，具有具体利用路径",
+      "checked_paths": ["src/auth/service.py", "src/auth/routes.py"],
+      "call_chain_summary": ["/refresh -> validate_refresh_token -> issue_token"]
+    }}
+  ],
+  "analysis_summary": {{
+    "total_input_findings": 0,
+    "decisions_returned": 0,
+    "filtered_count": 0,
+    "kept_count": 0
+  }}
+}}"""
 
 
 class FindingsFilter:
@@ -530,6 +638,8 @@ class FindingsFilter:
             external_session_manager: External session manager to reuse (if provided, 
                                      the filter will use this session instead of creating a new one)
         """
+        del api_key
+
         self.use_hard_exclusions = use_hard_exclusions
         self.use_claude_filtering = use_claude_filtering
         self.custom_filtering_instructions = custom_filtering_instructions
@@ -662,50 +772,80 @@ class FindingsFilter:
         excluded_claude = []
                 
         if self.use_claude_filtering and self.finding_analyzer and findings_after_hard:
-            # Process findings individually
-            logger.info(f"Processing {len(findings_after_hard)} findings individually through OpenCode Session Manager")
-            
-            for orig_idx, finding in findings_after_hard:
-                # Call finding analyzer for single finding
-                success, analysis_result, error_msg = self.finding_analyzer.analyze_single_finding(
-                    finding, pr_context, self.custom_filtering_instructions
-                )
-                
-                if success and analysis_result:
-                    # Process OpenCode's analysis for single finding
-                    confidence = analysis_result.get('confidence_score', 10.0)
-                    keep_finding = analysis_result.get('keep_finding', True)
-                    justification = analysis_result.get('justification', '')
-                    exclusion_reason = analysis_result.get('exclusion_reason')
-                    
+            logger.info(f"Batch processing {len(findings_after_hard)} findings through OpenCode Session Manager")
+
+            candidate_findings = [finding for _, finding in findings_after_hard]
+            success, analysis_result, error_msg = self.finding_analyzer.analyze_findings_batch(
+                candidate_findings,
+                pr_context,
+                self.custom_filtering_instructions,
+            )
+
+            if success and isinstance(analysis_result, dict):
+                decisions = analysis_result.get('finding_decisions', [])
+                decision_map: Dict[int, Dict[str, Any]] = {}
+                if isinstance(decisions, list):
+                    for decision in decisions:
+                        if not isinstance(decision, dict):
+                            continue
+                        index = decision.get('finding_index')
+                        if isinstance(index, int):
+                            decision_map[index] = decision
+
+                for local_index, (_, finding) in enumerate(findings_after_hard):
+                    decision = decision_map.get(local_index)
+                    if decision is None:
+                        enriched_finding = finding.copy()
+                        enriched_finding['_filter_metadata'] = {
+                            'confidence_score': 10.0,
+                            'justification': 'Batch decision missing; keeping finding by fail-open strategy',
+                        }
+                        findings_after_claude.append(enriched_finding)
+                        stats.kept_findings += 1
+                        continue
+
+                    confidence_raw = decision.get('confidence_score', 10.0)
+                    try:
+                        confidence = float(confidence_raw)
+                    except (TypeError, ValueError):
+                        confidence = 10.0
+
+                    keep_finding = bool(decision.get('keep_finding', True))
+                    justification = decision.get('justification', '')
+                    exclusion_reason = decision.get('exclusion_reason')
+                    checked_paths = decision.get('checked_paths', [])
+                    call_chain_summary = decision.get('call_chain_summary', [])
+
                     stats.confidence_scores.append(confidence)
-                    
+
                     if not keep_finding:
-                        # OpenCode recommends excluding
                         excluded_claude.append({
                             "finding": finding,
                             "confidence_score": confidence,
                             "exclusion_reason": exclusion_reason or f"Low confidence score: {confidence}",
                             "justification": justification,
-                            "filter_stage": "opencode_session"
+                            "checked_paths": checked_paths,
+                            "call_chain_summary": call_chain_summary,
+                            "filter_stage": "opencode_session_batch"
                         })
                         stats.claude_excluded += 1
                     else:
-                        # Keep finding with metadata
                         enriched_finding = finding.copy()
                         enriched_finding['_filter_metadata'] = {
                             'confidence_score': confidence,
                             'justification': justification,
+                            'checked_paths': checked_paths,
+                            'call_chain_summary': call_chain_summary,
                         }
                         findings_after_claude.append(enriched_finding)
                         stats.kept_findings += 1
-                else:
-                    # Finding analyzer call failed for this finding - keep it with warning
-                    logger.warning(f"Finding analyzer call failed for finding {orig_idx}: {error_msg}")
+            else:
+                logger.warning(f"Batch finding analyzer call failed: {error_msg}")
+                for _, finding in findings_after_hard:
                     enriched_finding = finding.copy()
                     enriched_finding['_filter_metadata'] = {
-                        'confidence_score': 10.0,  # Default high confidence
-                        'justification': f'OpenCode analysis failed: {error_msg}',
+                        'confidence_score': 10.0,
+                        'justification': f'OpenCode batch analysis failed: {error_msg}',
                     }
                     findings_after_claude.append(enriched_finding)
                     stats.kept_findings += 1

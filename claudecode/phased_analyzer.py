@@ -81,7 +81,6 @@ class PhasedSecurityAnalyzer:
 
         self.output_manager.save_json("phase1_response.json", response)
         self.output_manager.save_json("phase1_result.json", result)
-        self.output_manager.save_json("modules.json", result)
         return result
 
     def _execute_phase2(self, pr_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -99,7 +98,6 @@ class PhasedSecurityAnalyzer:
 
         self.output_manager.save_json("phase2_response.json", response)
         self.output_manager.save_json("phase2_result.json", result)
-        self.output_manager.save_json("module_risk_analysis.json", result)
         return result
 
     def _execute_phase3(self, pr_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -118,7 +116,6 @@ class PhasedSecurityAnalyzer:
 
         self.output_manager.save_json("phase3_response.json", response)
         self.output_manager.save_json("phase3_result.json", result)
-        self.output_manager.save_json("module_defects.json", result)
         return result
 
     def _execute_phase4(self) -> Dict[str, Any]:
@@ -158,7 +155,6 @@ class PhasedSecurityAnalyzer:
             },
         }
         self.output_manager.save_json("phase4_result.json", phase4)
-        self.output_manager.save_json("all_defects_raw.json", phase4)
         return phase4
 
     def _parse_phase_response(self, response: Dict[str, Any], phase_name: str) -> Tuple[bool, Dict[str, Any]]:

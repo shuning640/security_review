@@ -14,8 +14,6 @@ from pathlib import Path
 import re
 import time 
 import tempfile
-from opencode_ai import Opencode, Client
-
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["NO_PROXY"] = "127.0.0.1,7.185.124.169,7.192.168.161,localhost,*.huawei.com"
 
@@ -63,7 +61,7 @@ class GitHubActionClient:
         exclude_dirs = os.environ.get('EXCLUDE_DIRECTORIES', '')
         self.excluded_dirs = [d.strip() for d in exclude_dirs.split(',') if d.strip()] if exclude_dirs else []
         if self.excluded_dirs:
-            print(f"[Debug] Excluded directories: {self.excluded_dirs}", file=sys.stderr)
+            logger.debug(f"Excluded directories: {self.excluded_dirs}")
     
     def get_pr_data(self, host: str, repo_name: str, pr_number: int) -> Dict[str, Any]:
         """Get PR metadata and files from GitHub API.
@@ -192,7 +190,7 @@ class GitHubActionClient:
             if match:
                 filename = match.group(1)
                 if self._is_excluded(filename):
-                    print(f"[Debug] Filtering out excluded file: {filename}", file=sys.stderr)
+                    logger.debug(f"Filtering out excluded file: {filename}")
                     continue
             
             filtered_sections.append(section)
@@ -266,65 +264,16 @@ class RepositoryScopeClient:
 class SimpleClaudeRunner:
     """Simplified Claude Code runner for GitHub Actions."""
     
-    def __init__(self, timeout_seconds: Optional[int] = None):
-        """Initialize Claude runner with optional timeout.
+    def __init__(self, timeout_minutes: Optional[int] = None):
+        """Initialize Claude runner.
         
         Args:
-            timeout_seconds: Optional timeout for Claude operations
+            timeout_minutes: Timeout for Claude execution (defaults to SUBPROCESS_TIMEOUT)
         """
-        self.timeout_seconds = timeout_seconds or int(os.environ.get('CLAUDE_TIMEOUT', '1200'))
-        
-    def run_phased_security_audit(self, 
-                                  repo_dir: Path, 
-                                  pr_data: Dict[str, Any],
-                                  pr_diff: Optional[str] = None,
-                                  custom_scan_instructions: Optional[str] = None,
-                                  include_diff: bool = True) -> Tuple[bool, str, Dict[str, Any]]:
-        """Run phased security audit using the new OpenCode session-based workflow.
-        
-        Args:
-            repo_dir: Repository directory path
-            pr_data: PR data dictionary
-            pr_diff: Optional complete PR diff in unified format
-            custom_scan_instructions: Optional custom security categories to append
-            include_diff: Whether to include the diff in the analysis
-            
-        Returns:
-            Tuple of (success, error_message, results)
-        """
-        if not repo_dir.exists():
-            return False, f"Repository directory does not exist: {repo_dir}", {}
-        
-        try:
-            # Initialize session manager
-            session_manager = OpenCodeSessionManager(timeout_seconds=self.timeout_seconds, repo_path=str(repo_dir))
-            
-            # Create session and execute phased analysis
-            with session_manager:
-                # Initialize phased analyzer
-                phased_analyzer = PhasedSecurityAnalyzer(session_manager, output_dir=str(repo_dir))
-                
-                # Execute phased analysis
-                try:
-                    analysis_results = phased_analyzer.execute_phased_analysis(
-                        pr_data=pr_data,
-                        pr_diff=pr_diff,
-                        custom_scan_instructions=custom_scan_instructions,
-                        include_diff=include_diff,
-                        repo_dir=repo_dir
-                    )
-                    
-                    return True, "", analysis_results
-                    
-                except Exception as e:
-                    error_msg = f"Phased analysis execution failed: {str(e)}"
-                    logger.error(error_msg)
-                    return False, error_msg, {}
-                    
-        except Exception as e:
-            error_msg = f"Phased security audit initialization failed: {str(e)}"
-            logger.error(error_msg)
-            return False, error_msg, {}
+        if timeout_minutes is not None:
+            self.timeout_seconds = timeout_minutes * 60
+        else:
+            self.timeout_seconds = SUBPROCESS_TIMEOUT
     
     def run_phased_security_audit_with_session(self, 
                                              repo_dir: Path, 
@@ -402,17 +351,6 @@ class SimpleClaudeRunner:
                 except Exception as e:
                     logger.warning(f"关闭临时session时出错: {str(e)}")
     
-    def __init__(self, timeout_minutes: Optional[int] = None):
-        """Initialize Claude runner.
-        
-        Args:
-            timeout_minutes: Timeout for Claude execution (defaults to SUBPROCESS_TIMEOUT)
-        """
-        if timeout_minutes is not None:
-            self.timeout_seconds = timeout_minutes * 60
-        else:
-            self.timeout_seconds = SUBPROCESS_TIMEOUT
-    
     def run_security_audit(self, repo_dir: Path, prompt: str) -> Tuple[bool, str, Dict[str, Any]]:
         """Run Claude Code security audit.
         
@@ -429,7 +367,7 @@ class SimpleClaudeRunner:
         # Check prompt size
         prompt_size = len(prompt.encode('utf-8'))
         if prompt_size > 1024 * 1024:  # 1MB
-            print(f"[Warning] Large prompt size: {prompt_size / 1024 / 1024:.2f}MB", file=sys.stderr)
+            logger.warning(f"Large prompt size: {prompt_size / 1024 / 1024:.2f}MB")
         
         with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', delete=False, suffix='.txt') as temp_prompt_file:
             temp_prompt_file.write(prompt)
@@ -767,12 +705,6 @@ def apply_findings_filter_with_shared_session(original_findings: List[Dict[str, 
     # Determine filtering configuration from environment
     use_hard_exclusions = os.environ.get('ENABLE_HARD_EXCLUSIONS', 'true').lower() == 'true'
     use_claude_filtering = os.environ.get('ENABLE_OPENCODE_FILTERING', 'true').lower() == 'true'
-    api_key = os.environ.get('ANTHROPIC_API_KEY')
-    
-    # Only use OpenCode filtering if API key is available and session is provided
-    # if use_claude_filtering and not api_key:
-    #     use_claude_filtering = False
-    #     logger.info("OpenCode filtering disabled: API key not available")
     
     # Create filter based on availability
     try:
@@ -979,7 +911,6 @@ def main():
             },
             'filtering_summary': filter_stats,
         }
-        output_manager.save_json('final_defects.json', final_defects)
         output_manager.save_json('phase5_result.json', final_defects)
 
         if use_phased_analysis and isinstance(results, dict):
@@ -1003,10 +934,6 @@ def main():
             output['pr_number'] = pr_number
 
         output_manager.save_json('security_audit.json', output)
-        print(json.dumps(output, indent=2))
-
-        high_severity_count = len([f for f in kept_findings if str(f.get('severity', '')).upper() == 'HIGH'])
-        sys.exit(EXIT_GENERAL_ERROR if high_severity_count > 0 else EXIT_SUCCESS)
 
     except ConfigurationError as e:
         print(json.dumps({'error': str(e)}))
