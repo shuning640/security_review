@@ -28,26 +28,31 @@ def get_phase4_cwd_routing_prompt(
 {custom_scan_instructions}
 """
 
-    return f"""你正在执行全仓安全分析的 Phase 4：CWD 路由规划。
+    return f"""你正在执行模块级安全分析的 Phase 4：CWD 路由规划。
 
 仓库信息：
 - repository: {repo_name}
-- scan_scope: full_repository
+- scan_scope: module_only
 
-Phase 2 模块划分：
+当前模块信息（仅此模块）：
 {modules_context}
 
-Phase 3 风险分析：
+当前模块风险分析（仅此模块）：
 {risks_context}
 
 CWD 分类目录：
 {catalog_context}
 
 任务要求：
-1) 对每个模块从 CWD 分类目录中选出最需要优先检查的类型。
-2) 每个模块至少给 1 个 CWD，最多 5 个 CWD。
+1) 仅对当前模块从 CWD 分类目录中选出最需要优先检查的类型。
+2) 当前模块至少给 1 个 CWD，最多 5 个 CWD。
 3) 每条优先级都要给出：priority_score、skill_name、rationale、evidence_paths。
 4) 只允许使用 catalog 中存在的 cwd_id 和 skill_name。
+
+范围约束（必须遵守）：
+- 输出中的 module_cwd_priorities 仅允许包含一个模块对象（即当前模块）。
+- evidence_paths 必须来自当前模块 paths 或其直接子路径。
+- 不得输出其他模块的路由结果。
 
 输出格式（仅 JSON）：
 {{

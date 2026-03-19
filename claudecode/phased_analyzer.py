@@ -2,9 +2,11 @@
 
 import json
 import time
+import os
 from pathlib import Path
 from datetime import datetime
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, List
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from claudecode.json_parser import parse_json_with_fallbacks
 from claudecode.logger import get_logger
@@ -48,6 +50,117 @@ class PhasedSecurityAnalyzer:
 
         logger.info(f"Phased analyzer initialized. Session dir: {self.session_dir}")
 
+    def _get_phase_parallelism(self) -> int:
+        raw = os.environ.get("PHASE_PARALLELISM", "4")
+        try:
+            value = int(raw)
+        except ValueError:
+            value = 4
+        return max(1, min(value, 16))
+
+    @staticmethod
+    def _pick_module_entry(entries: List[Dict[str, Any]], module_name: str) -> Dict[str, Any]:
+        if not entries:
+            return {}
+        for entry in entries:
+            if entry.get("module_name") == module_name:
+                return entry
+        if len(entries) == 1:
+            return entries[0]
+        return {}
+
+    def _run_single_module_phase345(
+        self,
+        index: int,
+        module: Dict[str, Any],
+        pr_data: Dict[str, Any],
+        cwd_catalog: Dict[str, Any],
+    ) -> Tuple[int, Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+        module_name = module.get("module_name", f"module_{index}")
+        module_context = {"modules": [module]}
+
+        sub_session = OpenCodeSessionManager(
+            host=self.session_manager.host,
+            timeout_seconds=self.session_manager.timeout_seconds,
+            model=self.session_manager.model,
+            provider_id=self.session_manager.provider_id,
+            port=self.session_manager.port,
+        )
+
+        try:
+            sub_session.create_session()
+
+            prompt3 = get_phase3_comparative_analysis_prompt(
+                pr_data=pr_data,
+                phase2_results=module_context,
+                custom_scan_instructions=self.custom_scan_instructions,
+            )
+            self.output_manager.save_text(f"phase3_module_{index}_prompt.txt", prompt3)
+            response3 = sub_session.send_message(prompt=prompt3)
+            self.output_manager.save_json(f"phase3_module_{index}_response.json", response3)
+            ok3, parsed3 = self._parse_phase_response(response3, f"phase3_module_{index}")
+            if not ok3:
+                raise PhaseParseError(f"phase3 parse failed for module '{module_name}'")
+
+            phase3_selected = self._pick_module_entry(parsed3.get("module_risk_analysis", []), module_name)
+            if not phase3_selected:
+                phase3_selected = {
+                    "module_name": module_name,
+                    "business_flow": [],
+                    "key_functions": [],
+                    "attack_surfaces": [],
+                    "risks": [],
+                }
+            self.output_manager.save_json(f"phase3_module_{index}_result.json", phase3_selected)
+
+            prompt4 = get_phase4_cwd_routing_prompt(
+                pr_data=pr_data,
+                phase2_results=module_context,
+                phase3_results={"module_risk_analysis": [phase3_selected]},
+                cwd_catalog=cwd_catalog,
+                custom_scan_instructions=self.custom_scan_instructions,
+            )
+            self.output_manager.save_text(f"phase4_module_{index}_prompt.txt", prompt4)
+            response4 = sub_session.send_message(prompt=prompt4)
+            self.output_manager.save_json(f"phase4_module_{index}_response.json", response4)
+            ok4, parsed4 = self._parse_phase_response(response4, f"phase4_module_{index}")
+            if not ok4:
+                raise PhaseParseError(f"phase4 parse failed for module '{module_name}'")
+
+            phase4_selected = self._pick_module_entry(parsed4.get("module_cwd_priorities", []), module_name)
+            if not phase4_selected:
+                phase4_selected = {
+                    "module_name": module_name,
+                    "cwd_rankings": [],
+                }
+            self.output_manager.save_json(f"phase4_module_{index}_result.json", phase4_selected)
+
+            prompt5 = get_phase5_vulnerability_assessment_prompt(
+                pr_data=pr_data,
+                phase2_results=module_context,
+                phase3_results={"module_risk_analysis": [phase3_selected]},
+                phase4_results={"module_cwd_priorities": [phase4_selected]},
+                custom_scan_instructions=self.custom_scan_instructions,
+            )
+            self.output_manager.save_text(f"phase5_module_{index}_prompt.txt", prompt5)
+            response5 = sub_session.send_message(prompt=prompt5)
+            self.output_manager.save_json(f"phase5_module_{index}_response.json", response5)
+            ok5, parsed5 = self._parse_phase_response(response5, f"phase5_module_{index}")
+            if not ok5:
+                raise PhaseParseError(f"phase5 parse failed for module '{module_name}'")
+
+            phase5_selected = self._pick_module_entry(parsed5.get("module_defects", []), module_name)
+            if not phase5_selected:
+                phase5_selected = {
+                    "module_name": module_name,
+                    "defects": [],
+                }
+            self.output_manager.save_json(f"phase5_module_{index}_result.json", phase5_selected)
+
+            return index, phase3_selected, phase4_selected, phase5_selected
+        finally:
+            sub_session.close_session()
+
     def execute_phased_analysis(
         self,
         pr_data: Dict[str, Any],
@@ -72,12 +185,8 @@ class PhasedSecurityAnalyzer:
         self.phase1_skill_bootstrap_results = self._execute_phase1_skill_bootstrap()
         logger.info("Starting _execute_phase2")
         self.phase2_results = self._execute_phase2(pr_data)
-        logger.info("Starting _execute_phase3")
-        self.phase3_results = self._execute_phase3(pr_data)
-        logger.info("Starting _execute_phase4")
-        self.phase4_results = self._execute_phase4(pr_data)
-        logger.info("Starting _execute_phase5")
-        self.phase5_results = self._execute_phase5(pr_data)
+        logger.info("Starting _execute_module_pipeline_phase345")
+        self.phase3_results, self.phase4_results, self.phase5_results = self._execute_module_pipeline_phase345(pr_data)
         logger.info("Starting _execute_phase6")
         self.phase6_results = self._execute_phase6()
 
@@ -187,183 +296,184 @@ class PhasedSecurityAnalyzer:
         )
         return result
 
-    def _execute_phase3(self, pr_data: Dict[str, Any]) -> Dict[str, Any]:
-        phase_key = "phase3"
-        phase_name = "comparative_analysis"
-        started_at = datetime.now().isoformat()
-        start_time = time.time()
-        phase2_modules_context = {
-            "modules": self.phase2_results.get("modules", [])
-        }
+    def _execute_module_pipeline_phase345(
+        self,
+        pr_data: Dict[str, Any],
+    ) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+        phase3_started_at = datetime.now().isoformat()
+        phase3_start_time = time.time()
+        modules = self.phase2_results.get("modules", [])
+        parallelism = min(self._get_phase_parallelism(), max(1, len(modules)))
+        cwd_catalog = self._get_default_cwd_catalog()
 
-        prompt = get_phase3_comparative_analysis_prompt(
-            pr_data=pr_data,
-            phase2_results=phase2_modules_context,
-            custom_scan_instructions=self.custom_scan_instructions,
-        )
-        self.output_manager.save_text("phase3_prompt.txt", prompt)
+        if not modules:
+            phase3_result = {
+                "module_risk_analysis": [],
+                "analysis_summary": {
+                    "modules_analyzed": 0,
+                    "high_risk_count": 0,
+                    "medium_risk_count": 0,
+                    "low_risk_count": 0,
+                    "module_failures": 0,
+                },
+            }
+            phase4_result = {
+                "module_cwd_priorities": [],
+                "analysis_summary": {
+                    "modules_total": 0,
+                    "cwd_types_considered": len(cwd_catalog.get("cwd_types", [])),
+                    "pairs_selected": 0,
+                    "module_failures": 0,
+                },
+            }
+            phase5_result = {
+                "module_defects": [],
+                "analysis_summary": {
+                    "modules_scanned": 0,
+                    "total_defects": 0,
+                    "high": 0,
+                    "medium": 0,
+                    "low": 0,
+                    "review_completed": True,
+                    "module_failures": 0,
+                },
+            }
+            self.output_manager.save_json("phase3_result.json", phase3_result)
+            self.output_manager.save_json("phase4_result.json", phase4_result)
+            self.output_manager.save_json("phase5_result.json", phase5_result)
+            now = datetime.now().isoformat()
+            duration = time.time() - phase3_start_time
+            details = {"parallel_workers": 0, "total_modules": 0, "successful_modules": 0, "failed_modules": 0}
+            self._save_phase_metadata("phase3", "comparative_analysis", "success", phase3_started_at, now, duration, None, None, "phase3_result.json", details=details)
+            self._save_phase_metadata("phase4", "cwd_routing", "success", phase3_started_at, now, duration, None, None, "phase4_result.json", details=details)
+            self._save_phase_metadata("phase5", "vulnerability_assessment", "success", phase3_started_at, now, duration, None, None, "phase5_result.json", details=details)
+            return phase3_result, phase4_result, phase5_result
 
-        response = self.session_manager.send_message(prompt=prompt)
-        self.output_manager.save_json("phase3_response.json", response)
-        success, result = self._parse_phase_response(response, "phase3")
-        if not success:
+        successes: List[Tuple[int, Dict[str, Any], Dict[str, Any], Dict[str, Any]]] = []
+        failures: List[Dict[str, Any]] = []
+
+        with ThreadPoolExecutor(max_workers=parallelism) as executor:
+            future_map = {
+                executor.submit(self._run_single_module_phase345, idx, module, pr_data, cwd_catalog): (idx, module)
+                for idx, module in enumerate(modules)
+            }
+            for future in as_completed(future_map):
+                idx, module = future_map[future]
+                module_name = module.get("module_name", f"module_{idx}")
+                try:
+                    successes.append(future.result())
+                except Exception as exc:
+                    failure = {"index": idx, "module_name": module_name, "error": str(exc)}
+                    failures.append(failure)
+                    self.output_manager.save_json(f"module_{idx}_phase345_error.json", failure)
+
+        if not successes:
             error_payload = {
-                "phase": phase_key,
-                "name": phase_name,
-                "error": "Failed to parse phase response JSON",
-                "response": response,
+                "phase": "phase3",
+                "name": "comparative_analysis",
+                "error": "All module pipeline tasks failed",
+                "module_failures": failures,
             }
             self.output_manager.save_json("phase3_parse_error.json", error_payload)
-            self._save_phase_metadata(
-                phase=phase_key,
-                name=phase_name,
-                status="parse_error",
-                started_at=started_at,
-                ended_at=datetime.now().isoformat(),
-                duration_seconds=time.time() - start_time,
-                prompt_file="phase3_prompt.txt",
-                response_file="phase3_response.json",
-                result_file=None,
-                error_message="Failed to parse phase response JSON",
-            )
-            raise PhaseParseError("phase3 parse failed: invalid JSON response")
-
-        self.output_manager.save_json("phase3_result.json", result)
-        self._save_phase_metadata(
-            phase=phase_key,
-            name=phase_name,
-            status="success",
-            started_at=started_at,
-            ended_at=datetime.now().isoformat(),
-            duration_seconds=time.time() - start_time,
-            prompt_file="phase3_prompt.txt",
-            response_file="phase3_response.json",
-            result_file="phase3_result.json",
-        )
-        return result
-
-    def _execute_phase4(self, pr_data: Dict[str, Any]) -> Dict[str, Any]:
-        phase_key = "phase4"
-        phase_name = "cwd_routing"
-        started_at = datetime.now().isoformat()
-        start_time = time.time()
-        phase2_modules_context = {
-            "modules": self.phase2_results.get("modules", [])
-        }
-        phase3_risks_context = {
-            "module_risk_analysis": self.phase3_results.get("module_risk_analysis", [])
-        }
-
-        prompt = get_phase4_cwd_routing_prompt(
-            pr_data=pr_data,
-            phase2_results=phase2_modules_context,
-            phase3_results=phase3_risks_context,
-            cwd_catalog=self._get_default_cwd_catalog(),
-            custom_scan_instructions=self.custom_scan_instructions,
-        )
-        self.output_manager.save_text("phase4_prompt.txt", prompt)
-
-        response = self.session_manager.send_message(prompt=prompt)
-        self.output_manager.save_json("phase4_response.json", response)
-        success, result = self._parse_phase_response(response, "phase4")
-        if not success:
-            error_payload = {
-                "phase": phase_key,
-                "name": phase_name,
-                "error": "Failed to parse phase response JSON",
-                "response": response,
+            duration = time.time() - phase3_start_time
+            now = datetime.now().isoformat()
+            details = {
+                "parallel_workers": parallelism,
+                "total_modules": len(modules),
+                "successful_modules": 0,
+                "failed_modules": len(failures),
             }
-            self.output_manager.save_json("phase4_parse_error.json", error_payload)
-            self._save_phase_metadata(
-                phase=phase_key,
-                name=phase_name,
-                status="parse_error",
-                started_at=started_at,
-                ended_at=datetime.now().isoformat(),
-                duration_seconds=time.time() - start_time,
-                prompt_file="phase4_prompt.txt",
-                response_file="phase4_response.json",
-                result_file=None,
-                error_message="Failed to parse phase response JSON",
-            )
-            raise PhaseParseError("phase4 parse failed: invalid JSON response")
+            self._save_phase_metadata("phase3", "comparative_analysis", "parse_error", phase3_started_at, now, duration, None, None, None, "All module pipeline tasks failed", details)
+            self._save_phase_metadata("phase4", "cwd_routing", "parse_error", phase3_started_at, now, duration, None, None, None, "All module pipeline tasks failed", details)
+            self._save_phase_metadata("phase5", "vulnerability_assessment", "parse_error", phase3_started_at, now, duration, None, None, None, "All module pipeline tasks failed", details)
+            raise PhaseParseError("phase3-5 failed: all module pipeline tasks failed")
 
-        self.output_manager.save_json("phase4_result.json", result)
-        self._save_phase_metadata(
-            phase=phase_key,
-            name=phase_name,
-            status="success",
-            started_at=started_at,
-            ended_at=datetime.now().isoformat(),
-            duration_seconds=time.time() - start_time,
-            prompt_file="phase4_prompt.txt",
-            response_file="phase4_response.json",
-            result_file="phase4_result.json",
-        )
-        return result
+        ordered = sorted(successes, key=lambda x: x[0])
+        phase3_items = [item[1] for item in ordered]
+        phase4_items = [item[2] for item in ordered]
+        phase5_items = [item[3] for item in ordered]
 
-    def _execute_phase5(self, pr_data: Dict[str, Any]) -> Dict[str, Any]:
-        phase_key = "phase5"
-        phase_name = "vulnerability_assessment"
-        started_at = datetime.now().isoformat()
-        start_time = time.time()
-        phase2_modules_context = {
-            "modules": self.phase2_results.get("modules", [])
+        high_risk = medium_risk = low_risk = 0
+        for entry in phase3_items:
+            for risk in entry.get("risks", []):
+                level = str(risk.get("risk_level", "")).upper()
+                if level == "HIGH":
+                    high_risk += 1
+                elif level == "MEDIUM":
+                    medium_risk += 1
+                elif level == "LOW":
+                    low_risk += 1
+
+        pairs_selected = sum(len(entry.get("cwd_rankings", [])) for entry in phase4_items)
+
+        high = medium = low = total_defects = 0
+        for entry in phase5_items:
+            defects = entry.get("defects", [])
+            total_defects += len(defects)
+            for defect in defects:
+                level = str(defect.get("severity", "")).upper()
+                if level == "HIGH":
+                    high += 1
+                elif level == "MEDIUM":
+                    medium += 1
+                elif level == "LOW":
+                    low += 1
+
+        phase3_result = {
+            "module_risk_analysis": phase3_items,
+            "analysis_summary": {
+                "modules_analyzed": len(phase3_items),
+                "high_risk_count": high_risk,
+                "medium_risk_count": medium_risk,
+                "low_risk_count": low_risk,
+                "module_failures": len(failures),
+            },
         }
-        phase3_risks_context = {
-            "module_risk_analysis": self.phase3_results.get("module_risk_analysis", [])
+        phase4_result = {
+            "module_cwd_priorities": phase4_items,
+            "analysis_summary": {
+                "modules_total": len(modules),
+                "cwd_types_considered": len(cwd_catalog.get("cwd_types", [])),
+                "pairs_selected": pairs_selected,
+                "module_failures": len(failures),
+            },
         }
-        phase4_routing_context = {
-            "module_cwd_priorities": self.phase4_results.get("module_cwd_priorities", [])
+        phase5_result = {
+            "module_defects": phase5_items,
+            "analysis_summary": {
+                "modules_scanned": len(phase5_items),
+                "total_defects": total_defects,
+                "high": high,
+                "medium": medium,
+                "low": low,
+                "review_completed": True,
+                "module_failures": len(failures),
+            },
         }
 
-        prompt = get_phase5_vulnerability_assessment_prompt(
-            pr_data=pr_data,
-            phase2_results=phase2_modules_context,
-            phase3_results=phase3_risks_context,
-            phase4_results=phase4_routing_context,
-            custom_scan_instructions=self.custom_scan_instructions,
-        )
-        self.output_manager.save_text("phase5_prompt.txt", prompt)
+        if failures:
+            phase3_result["module_errors"] = failures
+            phase4_result["module_errors"] = failures
+            phase5_result["module_errors"] = failures
 
-        response = self.session_manager.send_message(prompt=prompt)
-        self.output_manager.save_json("phase5_response.json", response)
-        success, result = self._parse_phase_response(response, "phase5")
-        if not success:
-            error_payload = {
-                "phase": phase_key,
-                "name": phase_name,
-                "error": "Failed to parse phase response JSON",
-                "response": response,
-            }
-            self.output_manager.save_json("phase5_parse_error.json", error_payload)
-            self._save_phase_metadata(
-                phase=phase_key,
-                name=phase_name,
-                status="parse_error",
-                started_at=started_at,
-                ended_at=datetime.now().isoformat(),
-                duration_seconds=time.time() - start_time,
-                prompt_file="phase5_prompt.txt",
-                response_file="phase5_response.json",
-                result_file=None,
-                error_message="Failed to parse phase response JSON",
-            )
-            raise PhaseParseError("phase5 parse failed: invalid JSON response")
+        self.output_manager.save_json("phase3_result.json", phase3_result)
+        self.output_manager.save_json("phase4_result.json", phase4_result)
+        self.output_manager.save_json("phase5_result.json", phase5_result)
 
-        self.output_manager.save_json("phase5_result.json", result)
-        self._save_phase_metadata(
-            phase=phase_key,
-            name=phase_name,
-            status="success",
-            started_at=started_at,
-            ended_at=datetime.now().isoformat(),
-            duration_seconds=time.time() - start_time,
-            prompt_file="phase5_prompt.txt",
-            response_file="phase5_response.json",
-            result_file="phase5_result.json",
-        )
-        return result
+        status = "partial_success" if failures else "success"
+        now = datetime.now().isoformat()
+        duration = time.time() - phase3_start_time
+        details = {
+            "parallel_workers": parallelism,
+            "total_modules": len(modules),
+            "successful_modules": len(phase3_items),
+            "failed_modules": len(failures),
+        }
+        self._save_phase_metadata("phase3", "comparative_analysis", status, phase3_started_at, now, duration, None, None, "phase3_result.json", details=details)
+        self._save_phase_metadata("phase4", "cwd_routing", status, phase3_started_at, now, duration, None, None, "phase4_result.json", details=details)
+        self._save_phase_metadata("phase5", "vulnerability_assessment", status, phase3_started_at, now, duration, None, None, "phase5_result.json", details=details)
+
+        return phase3_result, phase4_result, phase5_result
 
     def _execute_phase6(self) -> Dict[str, Any]:
         """Aggregate all module defects into a deduplicated raw list."""
@@ -432,6 +542,7 @@ class PhasedSecurityAnalyzer:
         response_file: Optional[str],
         result_file: Optional[str],
         error_message: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
     ) -> None:
         metadata = {
             "phase": phase,
@@ -445,6 +556,8 @@ class PhasedSecurityAnalyzer:
             "result_file": result_file,
             "error_message": error_message,
         }
+        if details is not None:
+            metadata["details"] = details
         self.phase_metadata[phase] = metadata
         self.output_manager.save_json(f"{phase}_metadata.json", metadata)
 

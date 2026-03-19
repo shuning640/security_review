@@ -274,7 +274,7 @@ class OpenCodeSessionManager:
         if self.session_id:
             try:
                 self.client.session.delete(id=self.session_id)
-                logger.info("Session closed successfully")
+                logger.info(f"Session closed successfully. ID: {self.session_id}")
             except Exception as exc:
                 logger.warning(f"Failed to close session: {exc}")
                 result = False
