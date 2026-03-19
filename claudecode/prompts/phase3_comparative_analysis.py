@@ -33,10 +33,10 @@ def get_phase3_comparative_analysis_prompt(
 - repository: {repo_name}
 - scan_scope: module_only
 
-当前待分析模块（仅此模块）：
+当前待分析模块信息：
 {modules_context}
 
-任务要求（仅针对当前模块执行）：
+任务要求：
 1) 分析当前模块核心业务流程（包含调用链、关键函数、关键入口与出口、状态变化）。
 2) 识别当前模块潜在风险点，至少覆盖以下类型：
    - 权限控制缺失

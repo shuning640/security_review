@@ -34,10 +34,10 @@ def get_phase4_cwd_routing_prompt(
 - repository: {repo_name}
 - scan_scope: module_only
 
-当前模块信息（仅此模块）：
+当前模块信息：
 {modules_context}
 
-当前模块风险分析（仅此模块）：
+当前模块风险分析：
 {risks_context}
 
 CWD 分类目录：
