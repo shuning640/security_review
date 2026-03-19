@@ -7,8 +7,10 @@ from typing import Any, Dict, Optional, Tuple
 from claudecode.json_parser import parse_json_with_fallbacks
 from claudecode.logger import get_logger
 from claudecode.prompts import (
+    get_phase0_skill_bootstrap_prompt,
     get_phase1_context_study_prompt,
     get_phase2_comparative_analysis_prompt,
+    get_phase2_5_cwd_routing_prompt,
     get_phase3_vulnerability_assessment_prompt,
 )
 from claudecode.session_manager import OpenCodeSessionManager
@@ -30,8 +32,10 @@ class PhasedSecurityAnalyzer:
 
         self.phase1_results: Dict[str, Any] = {}
         self.phase2_results: Dict[str, Any] = {}
+        self.phase2_5_results: Dict[str, Any] = {}
         self.phase3_results: Dict[str, Any] = {}
         self.phase4_results: Dict[str, Any] = {}
+        self.phase0_skill_bootstrap_results: Dict[str, Any] = {}
         self.repo_dir: Optional[Path] = None
         self.custom_scan_instructions: Optional[str] = None
 
@@ -58,14 +62,32 @@ class PhasedSecurityAnalyzer:
         logger.info("Starting full-repository phased analysis")
         logger.info("=" * 80)
 
+        self.phase0_skill_bootstrap_results = self._execute_phase0_skill_bootstrap()
         self.phase1_results = self._execute_phase1(pr_data)
         self.phase2_results = self._execute_phase2(pr_data)
+        self.phase2_5_results = self._execute_phase2_5(pr_data)
         self.phase3_results = self._execute_phase3(pr_data)
         self.phase4_results = self._execute_phase4()
 
         final_result = self._aggregate_phase_results()
         logger.info("Phased analysis completed")
         return final_result
+
+    def _execute_phase0_skill_bootstrap(self) -> Dict[str, Any]:
+        prompt = get_phase0_skill_bootstrap_prompt(
+            cwd_catalog=self._get_default_cwd_catalog(),
+            custom_scan_instructions=self.custom_scan_instructions,
+        )
+        self.output_manager.save_text("phase0_skill_bootstrap_prompt.txt", prompt)
+
+        response = self.session_manager.send_message(prompt=prompt)
+        success, result = self._parse_phase_response(response, "phase0_skill_bootstrap")
+        if not success:
+            result = self._get_phase0_skill_bootstrap_fallback()
+
+        self.output_manager.save_json("phase0_skill_bootstrap_response.json", response)
+        self.output_manager.save_json("phase0_skill_bootstrap_result.json", result)
+        return result
 
     def _execute_phase1(self, pr_data: Dict[str, Any]) -> Dict[str, Any]:
         prompt = get_phase1_context_study_prompt(
@@ -100,11 +122,31 @@ class PhasedSecurityAnalyzer:
         self.output_manager.save_json("phase2_result.json", result)
         return result
 
+    def _execute_phase2_5(self, pr_data: Dict[str, Any]) -> Dict[str, Any]:
+        prompt = get_phase2_5_cwd_routing_prompt(
+            pr_data=pr_data,
+            phase1_results=self.phase1_results,
+            phase2_results=self.phase2_results,
+            cwd_catalog=self._get_default_cwd_catalog(),
+            custom_scan_instructions=self.custom_scan_instructions,
+        )
+        self.output_manager.save_text("phase2_5_prompt.txt", prompt)
+
+        response = self.session_manager.send_message(prompt=prompt)
+        success, result = self._parse_phase_response(response, "phase2_5")
+        if not success:
+            result = self._get_phase2_5_fallback()
+
+        self.output_manager.save_json("phase2_5_response.json", response)
+        self.output_manager.save_json("phase2_5_result.json", result)
+        return result
+
     def _execute_phase3(self, pr_data: Dict[str, Any]) -> Dict[str, Any]:
         prompt = get_phase3_vulnerability_assessment_prompt(
             pr_data=pr_data,
             phase1_results=self.phase1_results,
             phase2_results=self.phase2_results,
+            phase2_5_results=self.phase2_5_results,
             custom_scan_instructions=self.custom_scan_instructions,
         )
         self.output_manager.save_text("phase3_prompt.txt", prompt)
@@ -199,8 +241,10 @@ class PhasedSecurityAnalyzer:
             "findings": raw_defects,
             "analysis_summary": analysis_summary,
             "phased_results": {
+                "phase0_skill_bootstrap": self.phase0_skill_bootstrap_results,
                 "phase1": self.phase1_results,
                 "phase2": self.phase2_results,
+                "phase2_5": self.phase2_5_results,
                 "phase3": self.phase3_results,
                 "phase4": self.phase4_results,
             },
@@ -223,6 +267,17 @@ class PhasedSecurityAnalyzer:
         self.output_manager.save_json("phase1_fallback.json", result)
         return result
 
+    def _get_phase0_skill_bootstrap_fallback(self) -> Dict[str, Any]:
+        result = {
+            "skill_bootstrap_status": "fallback",
+            "skills_requested": [],
+            "skills_loaded": [],
+            "skills_missing": [],
+            "notes": ["phase0 skill bootstrap parsing failed; fallback used"],
+        }
+        self.output_manager.save_json("phase0_skill_bootstrap_fallback.json", result)
+        return result
+
     def _get_phase2_fallback(self) -> Dict[str, Any]:
         result = {
             "module_risk_analysis": [],
@@ -234,6 +289,18 @@ class PhasedSecurityAnalyzer:
             },
         }
         self.output_manager.save_json("phase2_fallback.json", result)
+        return result
+
+    def _get_phase2_5_fallback(self) -> Dict[str, Any]:
+        result = {
+            "module_cwd_priorities": [],
+            "analysis_summary": {
+                "modules_total": 0,
+                "cwd_types_considered": 0,
+                "pairs_selected": 0,
+            },
+        }
+        self.output_manager.save_json("phase2_5_fallback.json", result)
         return result
 
     def _get_phase3_fallback(self) -> Dict[str, Any]:
@@ -256,9 +323,38 @@ class PhasedSecurityAnalyzer:
             "session_path": str(self.session_dir),
             "phase1_completed": bool(self.phase1_results),
             "phase2_completed": bool(self.phase2_results),
+            "phase2_5_completed": bool(self.phase2_5_results),
             "phase3_completed": bool(self.phase3_results),
             "phase4_completed": bool(self.phase4_results),
             "session_files": [
                 f.name for f in self.session_dir.glob("*") if f.is_file()
             ] if self.session_dir.exists() else [],
+        }
+
+    def _get_default_cwd_catalog(self) -> Dict[str, Any]:
+        """Load CWD catalog from file with fallback."""
+        catalog_path = Path(__file__).with_name("cwd_catalog.json")
+        try:
+            with open(catalog_path, "r", encoding="utf-8") as f:
+                parsed = json.load(f)
+            if isinstance(parsed, dict) and isinstance(parsed.get("cwd_types"), list):
+                return parsed
+            logger.warning(f"Invalid cwd catalog format in {catalog_path}, using fallback")
+        except Exception as exc:
+            logger.warning(f"Failed to load cwd catalog from {catalog_path}: {exc}. Using fallback")
+
+        return {
+            "version": "fallback-v1",
+            "cwd_types": [
+                {
+                    "cwd_id": "CWD-1030",
+                    "name": "访问未初始化的指针",
+                    "skill_name": "CWD-1030",
+                },
+                {
+                    "cwd_id": "CWD-1031",
+                    "name": "空指针解引用",
+                    "skill_name": "CWD-1031",
+                },
+            ],
         }

@@ -8,6 +8,7 @@ def get_phase3_vulnerability_assessment_prompt(
     pr_diff: Optional[str] = None,
     phase1_results: dict = None,
     phase2_results: dict = None,
+    phase2_5_results: dict = None,
     include_diff: bool = True,
     custom_scan_instructions: Optional[str] = None,
 ) -> str:
@@ -18,9 +19,11 @@ def get_phase3_vulnerability_assessment_prompt(
     repo_name = pr_data.get("head", {}).get("repo", {}).get("full_name", "unknown")
     modules = phase1_results.get("modules", []) if isinstance(phase1_results, dict) else []
     module_risks = phase2_results.get("module_risk_analysis", []) if isinstance(phase2_results, dict) else []
+    module_cwd_priorities = phase2_5_results.get("module_cwd_priorities", []) if isinstance(phase2_5_results, dict) else []
 
     modules_context = json.dumps(modules, indent=2, ensure_ascii=False)
     risks_context = json.dumps(module_risks, indent=2, ensure_ascii=False)
+    cwd_routing_context = json.dumps(module_cwd_priorities, indent=2, ensure_ascii=False)
 
     custom_section = ""
     if custom_scan_instructions:
@@ -42,17 +45,26 @@ Phase 1 模块划分：
 Phase 2 风险分析：
 {risks_context}
 
+Phase 2.5 CWD 路由规划：
+{cwd_routing_context}
+
 任务要求：
 1) 针对每个模块，结合业务逻辑和风险点，做针对性代码检测。
+2) 对每个模块优先按照 CWD 路由中 priority_score 高的类型进行审查。
+3) 每个 CWD 类型审查前，尝试自主加载对应 skill_name；若无法加载，使用通用方法继续分析，但要标记状态。
 2) 仅输出真实可能触发的缺陷，减少理论性噪声。
-3) 缺陷必须满足“可利用性门槛”：必须给出触发路径和前置条件，否则不要报告。
-4) 每个缺陷必须给出：
+4) 缺陷必须满足“可利用性门槛”：必须给出触发路径和前置条件，否则不要报告。
+5) 每个缺陷必须给出：
    - file
    - line
    - defect_type
    - severity (HIGH/MEDIUM/LOW)
    - description
    - module_name
+   - cwd_id
+   - skill_name
+   - skill_load_status（loaded/failed/unknown）
+   - analysis_method（skill/fallback）
    - exploit_path（source -> sink 或攻击步骤摘要）
    - preconditions（攻击成立所需条件）
    - recommendation（可执行修复建议）
@@ -76,6 +88,10 @@ Phase 2 风险分析：
           "defect_type": "权限控制缺失",
           "severity": "HIGH",
           "description": "refresh token 未校验 token 归属用户，存在越权风险",
+          "cwd_id": "CWD-1031",
+          "skill_name": "cwd-authz",
+          "skill_load_status": "loaded",
+          "analysis_method": "skill",
           "risk_reasoning": "攻击者可通过窃取 token 伪造刷新流程",
           "exploit_path": "stolen_refresh_token -> refresh endpoint -> session issuance",
           "preconditions": ["攻击者持有可用 refresh token"],

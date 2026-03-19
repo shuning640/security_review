@@ -3,3 +3,4 @@ claudecode/.DS_Store
 .env
 __pycache__/
 claudecode/__pycache__/
+claudecode/prompts/__pycache__/

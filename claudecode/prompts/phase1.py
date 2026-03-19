@@ -24,7 +24,7 @@ def get_phase1_context_study_prompt(
 {custom_scan_instructions}
 """
 
-    return f"""你是一名资深应用安全工程师，正在对整个代码仓进行阶段化缺陷检测（不是PR变更检测）。
+    return f"""你是一名资深应用安全工程师，正在对整个代码仓进行阶段化缺陷检测。
 
 阶段目标（Phase 1）：代码仓模块拆分。
 

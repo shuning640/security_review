@@ -187,168 +187,6 @@ class FindingAnalyzer:
         
         logger.info(f"分析器初始化成功，会话目录：{self.filtering_session_dir}")
     
-    def analyze_single_finding(self, 
-                               finding: Dict[str, Any], 
-                               pr_context: Optional[Dict[str, Any]] = None,
-                               custom_filtering_instructions: Optional[str] = None) -> Tuple[bool, Dict[str, Any], str]:
-        """使用OpenCodeSessionManager分析单个安全发现以过滤误报。
-        
-        Args:
-            finding: 要分析的单个安全发现
-            pr_context: 可选的PR上下文以获得更好的分析
-            custom_filtering_instructions: 可选的自定义过滤指令
-            
-        Returns:
-            元组（成功，分析结果，错误消息）
-        """
-        # 兼容旧接口：单条分析统一走批量过滤实现，避免双实现分叉。
-        success, batch_result, error_msg = self.analyze_findings_batch(
-            findings=[finding],
-            pr_context=pr_context,
-            custom_filtering_instructions=custom_filtering_instructions,
-        )
-
-        if not success or not isinstance(batch_result, dict):
-            return False, {}, error_msg
-
-        decisions = batch_result.get("finding_decisions", [])
-        if isinstance(decisions, list) and decisions:
-            first = decisions[0]
-            if isinstance(first, dict):
-                return True, first, ""
-
-        return False, {}, "批量过滤未返回单条决策"
-
-        try:
-            logger.info("\\n" + "=" * 60)
-            logger.info("开始分析单个安全发现")
-            logger.info("=" * 60)
-            
-            # 生成唯一的分析ID
-            finding_id = f"finding_{finding.get('file', 'unknown').replace('/', '_')}_{finding.get('line', 0)}"
-            timestamp = datetime.now().strftime("%H%M%S")
-            call_id = f"{finding_id}_{timestamp}"
-            
-            logger.info(f"分析ID: {call_id}")
-            logger.info(f"文件: {finding.get('file', 'unknown')}:{finding.get('line', 0)}")
-            logger.info(f"类别: {finding.get('category', 'unknown')}")
-            
-            # 生成包含文件内容的分析提示词
-            prompt = self._generate_single_finding_prompt(finding, pr_context, custom_filtering_instructions)
-            system_prompt = self._generate_system_prompt()
-            
-            logger.info(f"提示词长度: {len(prompt)} 字符")
-            
-            # 保存提示词到文件
-            prompt_file = self.output_manager.save_text(f"{call_id}_prompt.txt", 
-                f"系统提示词:\n{system_prompt}\n\n用户提示词:\n{prompt}")
-            logger.info(f"API调用提示词已保存到: {prompt_file}")
-            
-            # 使用OpenCodeSessionManager进行大模型调用
-            try:
-                response_data = self.session_manager.send_message(prompt, system_prompt)
-                
-                # 提取响应文本
-                response_text = ""
-                if 'parts' in response_data:
-                    for part in response_data['parts']:
-                        if part.get('type') == 'text':
-                            response_text += part.get('text', '')
-                
-                # 保存原始响应到文件
-                response_data_to_save = {
-                    "final_response_text": response_text,
-                    "raw_response": response_data
-                }
-                response_file = self.output_manager.save_json(f"{call_id}_response.json", response_data_to_save)
-                logger.info(f"API原始响应已保存到: {response_file}")
-                
-                if not response_text:
-                    logger.warning(f"响应文本为空")
-                    return False, {}, "响应文本为空"
-                
-                logger.info(f"API响应长度: {len(response_text)} 字符")
-                
-                # 使用json_parser解析JSON响应
-                success, analysis_result = parse_json_with_fallbacks(response_text, "OpenCode响应")
-                if success:
-                    logger.info("成功解析单个安全发现的OpenCode响应")
-                    
-                    # 保存最终解析结果
-                    result_file = self.filtering_session_dir / f"{call_id}_result.json"
-                    final_result = analysis_result.copy()
-                    final_result.update({
-                        "analysis_id": call_id,
-                        "original_finding": finding,
-                        "pr_context": pr_context,
-                        "analysis_timestamp": datetime.now().isoformat(),
-                        "custom_filtering_instructions": custom_filtering_instructions
-                    })
-                    
-                    with open(result_file, 'w', encoding='utf-8') as f:
-                        json.dump(final_result, f, ensure_ascii=False, indent=2)
-                    
-                    logger.info(f"最终分析结果已保存到: {result_file}")
-                    logger.info(f"置信度评分: {analysis_result.get('confidence_score', 'N/A')}")
-                    logger.info(f"是否保留发现: {analysis_result.get('keep_finding', 'N/A')}")
-                    
-                    return True, analysis_result, ""
-                else:
-                    # 后备：返回错误
-                    logger.error("无法解析JSON响应")
-                    
-                    # 保存解析失败信息
-                    parse_error_file = self.filtering_session_dir / f"{call_id}_parse_error.json"
-                    parse_error_data = {
-                        "analysis_id": call_id,
-                        "error": "无法解析JSON响应",
-                        "raw_response": response_text,
-                        "original_finding": finding
-                    }
-                    
-                    with open(parse_error_file, 'w', encoding='utf-8') as f:
-                        json.dump(parse_error_data, f, ensure_ascii=False, indent=2)
-                    
-                    logger.info(f"解析错误信息已保存到: {parse_error_file}")
-                    return False, {}, "无法解析JSON响应"
-                    
-            except Exception as e:
-                logger.error(f"OpenCode调用失败: {str(e)}")
-                
-                # 保存错误信息
-                error_file = self.filtering_session_dir / f"{call_id}_error.json"
-                error_data = {
-                    "analysis_id": call_id,
-                    "error": str(e),
-                    "exception_type": type(e).__name__,
-                    "original_finding": finding,
-                    "pr_context": pr_context
-                }
-                
-                with open(error_file, 'w', encoding='utf-8') as f:
-                    json.dump(error_data, f, ensure_ascii=False, indent=2)
-                
-                logger.info(f"错误信息已保存到: {error_file}")
-                return False, {}, str(e)
-                
-        except Exception as e:
-            logger.exception(f"单个安全发现分析过程中出错：{str(e)}")
-            
-            # 保存异常信息
-            exception_file = self.filtering_session_dir / f"{call_id}_exception.json"
-            exception_data = {
-                "analysis_id": call_id,
-                "error": str(e),
-                "exception_type": type(e).__name__,
-                "original_finding": finding,
-                "pr_context": pr_context
-            }
-            
-            with open(exception_file, 'w', encoding='utf-8') as f:
-                json.dump(exception_data, f, ensure_ascii=False, indent=2)
-            
-            logger.info(f"异常信息已保存到: {exception_file}")
-            return False, {}, f"单个安全发现分析失败：{str(e)}"
     
     def _generate_system_prompt(self) -> str:
         """生成系统提示词"""
@@ -358,106 +196,6 @@ class FindingAnalyzer:
 
 必须严格按照用户提示中指定的格式返回有效的JSON。
 不要包含解释文本、Markdown格式或代码块。"""
-    
-    def _generate_single_finding_prompt(self, 
-                                       finding: Dict[str, Any], 
-                                       pr_context: Optional[Dict[str, Any]] = None,
-                                       custom_filtering_instructions: Optional[str] = None) -> str:
-        """生成用于分析单个安全发现的提示词。
-        
-        Args:
-            finding: 单个安全发现
-            pr_context: 可选的PR上下文
-            
-        Returns:
-            格式化的提示词字符串
-        """
-        pr_info = ""
-        if pr_context and isinstance(pr_context, dict):
-            pr_info = f"""
-PR上下文:
-- 仓库: {pr_context.get('repo_name', 'unknown')}
-- PR #{pr_context.get('pr_number', 'unknown')}
-- 标题: {pr_context.get('title', 'unknown')}
-- 描述: {(pr_context.get('description') or '无描述')[:500]}...
-"""
-        
-        file_content = ""
-        
-        finding_json = json.dumps(finding, indent=2)
-        
-        # Use custom filtering instructions if provided, otherwise use defaults
-        if custom_filtering_instructions:
-            filtering_section = custom_filtering_instructions
-        else:
-            filtering_section = """硬性排除规则 - 自动排除匹配以下模式的发现：
-1. 拒绝服务漏洞或资源耗尽攻击
-2. 存储在磁盘上的密钥/凭据（这些由单独流程管理）
-3. 速率限制问题或服务过载场景（服务不需要实现速率限制）
-4. 内存消耗或CPU耗尽问题
-5. 缺乏输入验证但没有已证明安全影响的非安全关键字段
-6. GitHub Action工作流中的输入清理问题
-7. 缺少安全强化措施。代码不需要实现所有的安全最佳实践，只要避免明显的漏洞即可。
-8. 理论上而非实际问题的竞态条件或计时攻击。只有在竞态条件极其严重时才报告。
-9. 与过时第三方库相关的漏洞。这些由单独管理，不应在此报告。
-10. 缓冲区溢出或释放后使用等内存安全问题在Rust中是不可能存在的。不要报告Rust代码中的内存安全问题。
-11. 仅作为单元测试或仅在测试运行中使用的文件。
-12. 日志欺骗问题。将未经清理的用户输入输出到日志不是漏洞。
-13. 仅控制路径的SSRF漏洞。只有当SSRF能够控制主机或协议时才是问题。
-14. 在AI系统提示中包含用户控制的内容不是漏洞。通常，在AI提示中包含用户输入不是漏洞。
-15. 不要报告与向项目添加不可从相关包仓库获得的依赖相关的问题。依赖不可公开访问的内部库不是漏洞。
-16. 不要报告导致代码崩溃但实际上不是漏洞的问题。例如，未定义或null的变量不是漏洞。
-  
-信号质量标准 - 对于剩余的发现，评估：
-1. 是否存在具体的、可利用的漏洞和清晰的攻击路径？
-2. 这代表真正的安全风险还是理论最佳实践？
-3. 是否有具体的代码位置和重现步骤？
-4. 这个发现对安全团队来说是否可操作？
-  
-先例标准 - 
-1. 以明文形式记录高价值密钥是漏洞。否则，不要报告密钥理论暴露的问题。记录URL被认为是安全的。记录请求头被认为是危险的，因为它们可能包含凭据。
-2. UUID可以假设为不可猜测，不需要验证。如果漏洞需要猜测UUID，则不是有效的漏洞。
-3. 审计日志不是关键安全功能，如果它们缺失或修改，不应报告为漏洞。
-4. 环境变量和CLI标志是可信值。攻击者无法在安全环境中修改它们。任何依赖于控制环境变量的攻击都是无效的。
-5. 内存或文件描述符泄漏等资源管理问题不是有效的。
-6. 细微或低影响的Web漏洞，如标签劫持、XS-Leaks、原型污染和开放重定向，不是有效的。
-7. 与过时第三方库相关的漏洞。这些由单独管理，不应在此报告。
-8. React通常对XSS安全。React不需要清理或转义用户输入，除非它使用dangerouslySetInnerHTML或类似方法。不要报告React组件或tsx文件中的XSS漏洞，除非它们使用不安全的方法。
-9. 大多数GitHub Action工作流中的漏洞在实践中不可利用。在验证GitHub Action工作流漏洞之前，确保它是具体的且有非常具体的攻击路径。
-10. 客户端TS代码中缺少权限检查或身份验证不是漏洞。客户端代码不受信任，不需要实现这些检查，它们在服务器端处理。这同样适用于所有将不受信任数据发送到后端的流程，后端负责验证和清理所有输入。
-11. 只有当中等严重性发现是明显和具体的问题时才包含。
-12. 大多数IPython笔记本(*.ipynb文件)中的漏洞在实践中不可利用。在验证笔记本漏洞之前，确保它是具体的且有非常具体的攻击路径。
-13. 记录非PII数据不是漏洞，即使数据可能是敏感的。只有当日志漏洞暴露敏感信息（如密钥、密码或个人身份信息(PII)）时才报告。
-14. Shell脚本中的命令注入漏洞在实践中通常不可利用，因为Shell脚本通常不会使用不受信任的用户输入运行。只有当Shell脚本中的命令注入漏洞对不受信任的输入有具体且有非常具体的攻击路径时才报告。
-15. 客户端JavaScript/TypeScript文件（.js, .ts, .tsx, .jsx）中的SSRF（服务器端请求伪造）漏洞是无效的，因为客户端代码无法做出会绕过防火墙或访问内部资源的服务器端请求。只在服务器端代码中报告SSRF（例如，已知在服务器端运行的Python或JS）。相同逻辑适用于路径遍历攻击，它们在客户端JS中不是问题。
-16. 使用../的路径遍历攻击在触发HTTP请求时通常不是问题。这些通常只在读取文件时相关，其中../可能允许访问意外文件。
-17. 注入到日志查询中通常不是问题。只有当注入明确导致向外部用户暴露敏感数据时才报告。"""
-        
-        return f"""我需要你分析来自自动化代码审计的一个安全发现，并确定它是否为误报。
-  
-{pr_info}
-  
-{filtering_section}
-  
-分配1-10的置信度评分：
-- 1-3：低置信度，可能是误报或噪音
-- 4-6：中等置信度，需要进一步调查  
-- 7-10：高置信度，可能是真正的漏洞
-  
-要分析的安全发现：
-```json
-{finding_json}
-```
-{file_content}
-  
-必须严格按照以下JSON结构回答（不要使用Markdown，不要使用代码块）：
-{{
-  "original_severity": "高",
-  "confidence_score": 8,
-  "keep_finding": true,
-  "exclusion_reason": null,
-  "justification": "清晰的SQL注入漏洞，具有具体利用路径"
-}}"""
     
     def analyze_findings_batch(self,
                                findings: List[Dict[str, Any]],
@@ -564,8 +302,51 @@ PR上下文:
         ]
         findings_json = json.dumps(indexed_findings, ensure_ascii=False, indent=2)
 
-        filtering_section = custom_filtering_instructions or """硬性排除规则：过滤DoS、速率限制、资源耗尽、仅理论问题、与实际运行边界无关的问题；仅保留具备明确攻击路径和可操作修复建议的发现。"""
-
+        if custom_filtering_instructions:
+            filtering_section = custom_filtering_instructions
+        else:
+            filtering_section = """硬性排除规则 - 自动排除匹配以下模式的发现：
+1. 拒绝服务漏洞或资源耗尽攻击
+2. 存储在磁盘上的密钥/凭据（这些由单独流程管理）
+3. 速率限制问题或服务过载场景（服务不需要实现速率限制）
+4. 内存消耗或CPU耗尽问题
+5. 缺乏输入验证但没有已证明安全影响的非安全关键字段
+6. GitHub Action工作流中的输入清理问题
+7. 缺少安全强化措施。代码不需要实现所有的安全最佳实践，只要避免明显的漏洞即可。
+8. 理论上而非实际问题的竞态条件或计时攻击。只有在竞态条件极其严重时才报告。
+9. 与过时第三方库相关的漏洞。这些由单独管理，不应在此报告。
+10. 缓冲区溢出或释放后使用等内存安全问题在Rust中是不可能存在的。不要报告Rust代码中的内存安全问题。
+11. 仅作为单元测试或仅在测试运行中使用的文件。
+12. 日志欺骗问题。将未经清理的用户输入输出到日志不是漏洞。
+13. 仅控制路径的SSRF漏洞。只有当SSRF能够控制主机或协议时才是问题。
+14. 在AI系统提示中包含用户控制的内容不是漏洞。通常，在AI提示中包含用户输入不是漏洞。
+15. 不要报告与向项目添加不可从相关包仓库获得的依赖相关的问题。依赖不可公开访问的内部库不是漏洞。
+16. 不要报告导致代码崩溃但实际上不是漏洞的问题。例如，未定义或null的变量不是漏洞。
+  
+信号质量标准 - 对于剩余的发现，评估：
+1. 是否存在具体的、可利用的漏洞和清晰的攻击路径？
+2. 这代表真正的安全风险还是理论最佳实践？
+3. 是否有具体的代码位置和重现步骤？
+4. 这个发现对安全团队来说是否可操作？
+  
+先例标准 - 
+1. 以明文形式记录高价值密钥是漏洞。否则，不要报告密钥理论暴露的问题。记录URL被认为是安全的。记录请求头被认为是危险的，因为它们可能包含凭据。
+2. UUID可以假设为不可猜测，不需要验证。如果漏洞需要猜测UUID，则不是有效的漏洞。
+3. 审计日志不是关键安全功能，如果它们缺失或修改，不应报告为漏洞。
+4. 环境变量和CLI标志是可信值。攻击者无法在安全环境中修改它们。任何依赖于控制环境变量的攻击都是无效的。
+5. 内存或文件描述符泄漏等资源管理问题不是有效的。
+6. 细微或低影响的Web漏洞，如标签劫持、XS-Leaks、原型污染和开放重定向，不是有效的。
+7. 与过时第三方库相关的漏洞。这些由单独管理，不应在此报告。
+8. React通常对XSS安全。React不需要清理或转义用户输入，除非它使用dangerouslySetInnerHTML或类似方法。不要报告React组件或tsx文件中的XSS漏洞，除非它们使用不安全的方法。
+9. 大多数GitHub Action工作流中的漏洞在实践中不可利用。在验证GitHub Action工作流漏洞之前，确保它是具体的且有非常具体的攻击路径。
+10. 客户端TS代码中缺少权限检查或身份验证不是漏洞。客户端代码不受信任，不需要实现这些检查，它们在服务器端处理。这同样适用于所有将不受信任数据发送到后端的流程，后端负责验证和清理所有输入。
+11. 只有当中等严重性发现是明显和具体的问题时才包含。
+12. 大多数IPython笔记本(*.ipynb文件)中的漏洞在实践中不可利用。在验证笔记本漏洞之前，确保它是具体的且有非常具体的攻击路径。
+13. 记录非PII数据不是漏洞，即使数据可能是敏感的。只有当日志漏洞暴露敏感信息（如密钥、密码或个人身份信息(PII)）时才报告。
+14. Shell脚本中的命令注入漏洞在实践中通常不可利用，因为Shell脚本通常不会使用不受信任的用户输入运行。只有当Shell脚本中的命令注入漏洞对不受信任的输入有具体且有非常具体的攻击路径时才报告。
+15. 客户端JavaScript/TypeScript文件（.js, .ts, .tsx, .jsx）中的SSRF（服务器端请求伪造）漏洞是无效的，因为客户端代码无法做出会绕过防火墙或访问内部资源的服务器端请求。只在服务器端代码中报告SSRF（例如，已知在服务器端运行的Python或JS）。相同逻辑适用于路径遍历攻击，它们在客户端JS中不是问题。
+16. 使用../的路径遍历攻击在触发HTTP请求时通常不是问题。这些通常只在读取文件时相关，其中../可能允许访问意外文件。
+17. 注入到日志查询中通常不是问题。只有当注入明确导致向外部用户暴露敏感数据时才报告。"""
         return f"""我需要你批量分析来自自动化代码审计的安全发现，并确定哪些应被过滤。
 
 {pr_info}

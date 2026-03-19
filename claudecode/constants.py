@@ -7,7 +7,7 @@ import os
 # API Configuration
 DEFAULT_CLAUDE_MODEL = os.environ.get('CLAUDE_MODEL') or 'GLM-4.7'
 DEFAULT_CLAUDE_PROVIDER = os.environ.get('CLAUDE_PROVIDER') or 'yun'
-DEFAULT_TIMEOUT_SECONDS = 1200  # 3 minutes
+DEFAULT_TIMEOUT_SECONDS = 1200  # 20 minutes
 DEFAULT_MAX_RETRIES = 3
 RATE_LIMIT_BACKOFF_MAX = 30  # Maximum backoff time for rate limits
 
@@ -20,5 +20,5 @@ EXIT_GENERAL_ERROR = 1
 EXIT_CONFIGURATION_ERROR = 2
 
 # Subprocess Configuration
-SUBPROCESS_TIMEOUT = 1200  # 20 minutes for Claude Code execution
+SUBPROCESS_TIMEOUT = 1200  # 20 minutes
 

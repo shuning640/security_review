@@ -1,0 +1,10 @@
+{
+  "version": "builtin-v1",
+  "cwd_types": [
+    {
+      "cwd_id": "CWD-1031",
+      "name": "空指针解引用",
+      "skill_name": "cwd-1031-detection"
+    }
+  ]
+}
