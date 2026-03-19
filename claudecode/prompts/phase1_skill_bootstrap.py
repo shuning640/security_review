@@ -1,14 +1,14 @@
-"""Phase 0 prompt: ask model to bootstrap CWD skills."""
+"""Phase 1 prompt: ask model to bootstrap CWD skills."""
 
 from typing import Optional
 import json
 
 
-def get_phase0_skill_bootstrap_prompt(
+def get_phase1_skill_bootstrap_prompt(
     cwd_catalog: dict,
     custom_scan_instructions: Optional[str] = None,
 ) -> str:
-    """Generate phase-0 prompt for autonomous CWD skill bootstrap."""
+    """Generate phase-1 prompt for autonomous CWD skill bootstrap."""
     catalog_context = json.dumps(cwd_catalog, indent=2, ensure_ascii=False)
 
     custom_section = ""
@@ -19,7 +19,7 @@ def get_phase0_skill_bootstrap_prompt(
 {custom_scan_instructions}
 """
 
-    return f"""你正在执行全仓安全分析的 Phase 0：技能预加载。
+    return f"""你正在执行全仓安全分析的 Phase 1：技能预加载。
 
 任务目标：
 1) 根据给定的 CWD 分类目录，尝试自主加载对应技能（skills）。
@@ -44,3 +44,7 @@ CWD 分类目录：
 - 若无法确认加载状态，放入 skills_missing 并在 notes 说明。
 {custom_section}
 """
+
+
+# Backward-compatible alias
+get_phase0_skill_bootstrap_prompt = get_phase1_skill_bootstrap_prompt

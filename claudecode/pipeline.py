@@ -870,7 +870,7 @@ def main():
 
         phased_results = results.get('phased_results', {}) if use_phased_analysis else {}
         if use_phased_analysis:
-            original_findings = phased_results.get('phase4', {}).get('all_defects', [])
+            original_findings = phased_results.get('phase6', {}).get('all_defects', [])
         else:
             original_findings = results.get('findings', [])
 
@@ -911,10 +911,10 @@ def main():
             },
             'filtering_summary': filter_stats,
         }
-        output_manager.save_json('phase5_result.json', final_defects)
+        output_manager.save_json('phase7_result.json', final_defects)
 
         if use_phased_analysis and isinstance(results, dict):
-            results.setdefault('phased_results', {})['phase5'] = final_defects
+            results.setdefault('phased_results', {})['phase7'] = final_defects
 
         output = {
             'scan_scope': analysis_summary['scan_scope'],

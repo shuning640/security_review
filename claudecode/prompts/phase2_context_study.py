@@ -1,14 +1,14 @@
-"""Phase 1 prompt: repository module decomposition."""
+"""Phase 2 prompt: repository module decomposition."""
 
 from typing import Optional
 
-def get_phase1_context_study_prompt(
+def get_phase2_context_study_prompt(
     pr_data: dict,
     pr_diff: Optional[str] = None,
     include_diff: bool = True,
     custom_scan_instructions: Optional[str] = None,
 ) -> str:
-    """Generate phase-1 prompt for full-repository module decomposition."""
+    """Generate phase-2 prompt for full-repository module decomposition."""
     del pr_diff
     del include_diff
 
@@ -26,7 +26,7 @@ def get_phase1_context_study_prompt(
 
     return f"""你是一名资深应用安全工程师，正在对整个代码仓进行阶段化缺陷检测。
 
-阶段目标（Phase 1）：代码仓模块拆分。
+阶段目标（Phase 2）：代码仓模块拆分。
 
 仓库上下文：
 - repository: {repo_name}
@@ -81,3 +81,7 @@ def get_phase1_context_study_prompt(
 如果无法确定某字段，请返回空数组或 "unknown"，不要编造。
 {custom_section}
 """
+
+
+# Backward-compatible alias
+get_phase1_context_study_prompt = get_phase2_context_study_prompt

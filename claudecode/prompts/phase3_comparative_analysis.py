@@ -1,16 +1,16 @@
-"""Phase 2 prompt: module business and risk analysis."""
+"""Phase 3 prompt: module business and risk analysis."""
 
 from typing import Optional
 import json
 
-def get_phase2_comparative_analysis_prompt(
+def get_phase3_comparative_analysis_prompt(
     pr_data: dict,
     pr_diff: Optional[str] = None,
     phase1_results: dict = None,
     include_diff: bool = True,
     custom_scan_instructions: Optional[str] = None,
 ) -> str:
-    """Generate phase-2 prompt for per-module business flow and risk analysis."""
+    """Generate phase-3 prompt for per-module business flow and risk analysis."""
     del pr_diff
     del include_diff
 
@@ -27,13 +27,13 @@ def get_phase2_comparative_analysis_prompt(
 {custom_scan_instructions}
 """
 
-    return f"""你是一名资深应用安全工程师，正在执行全仓安全分析的 Phase 2：模块业务逻辑与风险分析。
+    return f"""你是一名资深应用安全工程师，正在执行全仓安全分析的 Phase 3：模块业务逻辑与风险分析。
 
 仓库信息：
 - repository: {repo_name}
 - scan_scope: full_repository
 
-Phase 1 模块拆分结果如下：
+Phase 2 模块拆分结果如下：
 {modules_context}
 
 任务要求（对每个模块分别执行）：
@@ -90,3 +90,7 @@ Phase 1 模块拆分结果如下：
 - 若某模块未识别到有效风险，risks 返回空数组。
 {custom_section}
 """
+
+
+# Backward-compatible alias
+get_phase2_comparative_analysis_prompt = get_phase3_comparative_analysis_prompt

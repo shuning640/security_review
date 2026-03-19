@@ -1,17 +1,17 @@
-"""Phase 2.5 prompt: module-to-CWD prioritization routing."""
+"""Phase 4 prompt: module-to-CWD prioritization routing."""
 
 from typing import Optional
 import json
 
 
-def get_phase2_5_cwd_routing_prompt(
+def get_phase4_cwd_routing_prompt(
     pr_data: dict,
     phase1_results: dict,
     phase2_results: dict,
     cwd_catalog: dict,
     custom_scan_instructions: Optional[str] = None,
 ) -> str:
-    """Generate phase-2.5 prompt for module × CWD priority routing."""
+    """Generate phase-4 prompt for module × CWD priority routing."""
     repo_name = pr_data.get("head", {}).get("repo", {}).get("full_name", "unknown")
     modules = phase1_results.get("modules", []) if isinstance(phase1_results, dict) else []
     module_risks = phase2_results.get("module_risk_analysis", []) if isinstance(phase2_results, dict) else []
@@ -28,16 +28,16 @@ def get_phase2_5_cwd_routing_prompt(
 {custom_scan_instructions}
 """
 
-    return f"""你正在执行全仓安全分析的 Phase 2.5：CWD 路由规划。
+    return f"""你正在执行全仓安全分析的 Phase 4：CWD 路由规划。
 
 仓库信息：
 - repository: {repo_name}
 - scan_scope: full_repository
 
-Phase 1 模块划分：
+Phase 2 模块划分：
 {modules_context}
 
-Phase 2 风险分析：
+Phase 3 风险分析：
 {risks_context}
 
 CWD 分类目录：
@@ -78,3 +78,7 @@ CWD 分类目录：
 - priority_score 范围 [0,1]。
 {custom_section}
 """
+
+
+# Backward-compatible alias
+get_phase2_5_cwd_routing_prompt = get_phase4_cwd_routing_prompt
