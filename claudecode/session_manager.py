@@ -73,6 +73,10 @@ class OpenCodeSessionManager:
         return (parsed.hostname or "") in {"127.0.0.1", "localhost", "::1"}
 
     @staticmethod
+    def _is_windows() -> bool:
+        return os.name == "nt"
+
+    @staticmethod
     def _is_port_listening(port: int, timeout_seconds: float = 0.5) -> bool:
         try:
             with socket.create_connection(("127.0.0.1", port), timeout=timeout_seconds):
@@ -100,20 +104,40 @@ class OpenCodeSessionManager:
             self._owns_server = False
             return
 
-        cmd = ["opencode", "serve", "--port", str(self.port)]
-        logger.info(f"Starting OpenCode server: {' '.join(cmd)}")
+        server_bin_candidates = ["opencode", "opencode.cwd"]
+        server_bin = os.environ.get("OPENCODE_SERVER_BIN")
+        if server_bin:
+            server_bin_candidates = [server_bin]
 
-        try:
-            self._server_process = subprocess.Popen(
-                cmd,
-                cwd=repo_abs_path,
-                text=True,
-                start_new_session=True,
-            )
+        cmd = None
+        for candidate in server_bin_candidates:
+            cmd_candidate = [candidate, "serve", "--port", str(self.port)]
+            if self._is_windows():
+                cmd = " ".join(cmd_candidate)
+            else:
+                cmd = cmd_candidate
+            logger.info(f"Starting OpenCode server: {' '.join(cmd_candidate)}")
+            try:
+                self._server_process = subprocess.Popen(
+                    cmd,
+                    cwd=repo_abs_path,
+                    text=True,
+                    start_new_session=True,
+                    shell=self._is_windows(),
+                )
+                break
+            except FileNotFoundError:
+                self._server_process = None
+                continue
+
+        if self._server_process is None:
+            raise RuntimeError("Failed to start OpenCode server: command not found (tried opencode, opencode.cwd)")
+
+        if hasattr(os, "getpgid") and not self._is_windows():
             self._server_pgid = os.getpgid(self._server_process.pid)
-            self._owns_server = True
-        except FileNotFoundError as exc:
-            raise RuntimeError("Failed to start OpenCode server: 'opencode' command not found") from exc
+        else:
+            self._server_pgid = None
+        self._owns_server = True
 
         if not self._wait_server_ready():
             return_code = self._server_process.poll() if self._server_process else None
@@ -134,14 +158,14 @@ class OpenCodeSessionManager:
             return
 
         logger.info("Stopping background OpenCode server...")
-        if self._server_pgid is not None:
+        if self._server_pgid is not None and hasattr(os, "killpg"):
             os.killpg(self._server_pgid, signal.SIGTERM)
         else:
             self._server_process.terminate()
         try:
             self._server_process.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            if self._server_pgid is not None:
+            if self._server_pgid is not None and hasattr(os, "killpg"):
                 os.killpg(self._server_pgid, signal.SIGKILL)
             else:
                 self._server_process.kill()
@@ -160,11 +184,18 @@ class OpenCodeSessionManager:
     @staticmethod
     def _kill_port_listener(port: int) -> None:
         try:
+            is_windows = os.name == "nt"
+            if is_windows:
+                cmd = f"netstat -ano | findstr :{port}"
+            else:
+                cmd = f"lsof -nP -iTCP:{port} -sTCP:LISTEN -t"
+
             result = subprocess.run(
-                ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+                cmd,
                 capture_output=True,
                 text=True,
                 timeout=3,
+                shell=is_windows,
             )
         except Exception:
             return
@@ -172,18 +203,37 @@ class OpenCodeSessionManager:
         if result.returncode != 0:
             return
 
-        for line in result.stdout.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                pid = int(line)
-            except ValueError:
-                continue
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except Exception:
-                continue
+        if os.name == "nt":
+            pids = []
+            for line in result.stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split()
+                if not parts:
+                    continue
+                try:
+                    pids.append(int(parts[-1]))
+                except ValueError:
+                    continue
+            for pid in set(pids):
+                try:
+                    subprocess.run(f"taskkill /PID {pid} /T /F", timeout=3, shell=True)
+                except Exception:
+                    continue
+        else:
+            for line in result.stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    pid = int(line)
+                except ValueError:
+                    continue
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except Exception:
+                    continue
 
     def create_session(self) -> str:
         try:

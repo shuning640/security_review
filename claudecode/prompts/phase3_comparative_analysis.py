@@ -6,7 +6,7 @@ import json
 def get_phase3_comparative_analysis_prompt(
     pr_data: dict,
     pr_diff: Optional[str] = None,
-    phase1_results: dict = None,
+    phase2_results: dict = None,
     include_diff: bool = True,
     custom_scan_instructions: Optional[str] = None,
 ) -> str:
@@ -15,7 +15,7 @@ def get_phase3_comparative_analysis_prompt(
     del include_diff
 
     repo_name = pr_data.get("head", {}).get("repo", {}).get("full_name", "unknown")
-    modules = phase1_results.get("modules", []) if isinstance(phase1_results, dict) else []
+    modules = phase2_results.get("modules", []) if isinstance(phase2_results, dict) else []
 
     modules_context = json.dumps(modules, indent=2, ensure_ascii=False)
 
@@ -90,7 +90,3 @@ Phase 2 模块拆分结果如下：
 - 若某模块未识别到有效风险，risks 返回空数组。
 {custom_section}
 """
-
-
-# Backward-compatible alias
-get_phase2_comparative_analysis_prompt = get_phase3_comparative_analysis_prompt

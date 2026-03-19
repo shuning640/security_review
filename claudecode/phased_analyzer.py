@@ -61,12 +61,17 @@ class PhasedSecurityAnalyzer:
         logger.info("=" * 80)
         logger.info("Starting full-repository phased analysis")
         logger.info("=" * 80)
-
+        logger.info("Starting _execute_phase1_skill_bootstrap")
         self.phase1_skill_bootstrap_results = self._execute_phase1_skill_bootstrap()
+        logger.info("Starting _execute_phase2")
         self.phase2_results = self._execute_phase2(pr_data)
+        logger.info("Starting _execute_phase3")
         self.phase3_results = self._execute_phase3(pr_data)
+        logger.info("Starting _execute_phase4")
         self.phase4_results = self._execute_phase4(pr_data)
+        logger.info("Starting _execute_phase5")
         self.phase5_results = self._execute_phase5(pr_data)
+        logger.info("Starting _execute_phase6")
         self.phase6_results = self._execute_phase6()
 
         final_result = self._aggregate_phase_results()
@@ -108,7 +113,7 @@ class PhasedSecurityAnalyzer:
     def _execute_phase3(self, pr_data: Dict[str, Any]) -> Dict[str, Any]:
         prompt = get_phase3_comparative_analysis_prompt(
             pr_data=pr_data,
-            phase1_results=self.phase2_results,
+            phase2_results=self.phase2_results,
             custom_scan_instructions=self.custom_scan_instructions,
         )
         self.output_manager.save_text("phase3_prompt.txt", prompt)
@@ -125,8 +130,8 @@ class PhasedSecurityAnalyzer:
     def _execute_phase4(self, pr_data: Dict[str, Any]) -> Dict[str, Any]:
         prompt = get_phase4_cwd_routing_prompt(
             pr_data=pr_data,
-            phase1_results=self.phase2_results,
-            phase2_results=self.phase3_results,
+            phase2_results=self.phase2_results,
+            phase3_results=self.phase3_results,
             cwd_catalog=self._get_default_cwd_catalog(),
             custom_scan_instructions=self.custom_scan_instructions,
         )
@@ -144,8 +149,8 @@ class PhasedSecurityAnalyzer:
     def _execute_phase5(self, pr_data: Dict[str, Any]) -> Dict[str, Any]:
         prompt = get_phase5_vulnerability_assessment_prompt(
             pr_data=pr_data,
-            phase1_results=self.phase2_results,
-            phase2_results=self.phase3_results,
+            phase2_results=self.phase2_results,
+            phase3_results=self.phase3_results,
             phase4_results=self.phase4_results,
             custom_scan_instructions=self.custom_scan_instructions,
         )

@@ -6,15 +6,15 @@ import json
 
 def get_phase4_cwd_routing_prompt(
     pr_data: dict,
-    phase1_results: dict,
     phase2_results: dict,
+    phase3_results: dict,
     cwd_catalog: dict,
     custom_scan_instructions: Optional[str] = None,
 ) -> str:
     """Generate phase-4 prompt for module × CWD priority routing."""
     repo_name = pr_data.get("head", {}).get("repo", {}).get("full_name", "unknown")
-    modules = phase1_results.get("modules", []) if isinstance(phase1_results, dict) else []
-    module_risks = phase2_results.get("module_risk_analysis", []) if isinstance(phase2_results, dict) else []
+    modules = phase2_results.get("modules", []) if isinstance(phase2_results, dict) else []
+    module_risks = phase3_results.get("module_risk_analysis", []) if isinstance(phase3_results, dict) else []
 
     modules_context = json.dumps(modules, indent=2, ensure_ascii=False)
     risks_context = json.dumps(module_risks, indent=2, ensure_ascii=False)
@@ -78,7 +78,3 @@ CWD 分类目录：
 - priority_score 范围 [0,1]。
 {custom_section}
 """
-
-
-# Backward-compatible alias
-get_phase2_5_cwd_routing_prompt = get_phase4_cwd_routing_prompt

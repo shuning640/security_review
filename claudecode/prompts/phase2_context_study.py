@@ -81,7 +81,3 @@ def get_phase2_context_study_prompt(
 如果无法确定某字段，请返回空数组或 "unknown"，不要编造。
 {custom_section}
 """
-
-
-# Backward-compatible alias
-get_phase1_context_study_prompt = get_phase2_context_study_prompt

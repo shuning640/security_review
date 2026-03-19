@@ -44,7 +44,3 @@ CWD 分类目录：
 - 若无法确认加载状态，放入 skills_missing 并在 notes 说明。
 {custom_section}
 """
-
-
-# Backward-compatible alias
-get_phase0_skill_bootstrap_prompt = get_phase1_skill_bootstrap_prompt
