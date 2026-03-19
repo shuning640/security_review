@@ -288,7 +288,8 @@ class OpenCodeSessionManager:
         if not self.session_id:
             return {"status": "no_active_session"}
         try:
-            return self.client.session.messages(id=self.session_id)
+            response = self.client.session.messages(id=self.session_id)
+            return response
         except Exception as exc:
             logger.error(f"Failed to get session info: {exc}")
             return {"error": str(exc)}

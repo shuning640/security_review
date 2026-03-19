@@ -61,8 +61,8 @@ CWD 分类目录：
       "module_name": "用户与认证",
       "cwd_rankings": [
         {{
-          "cwd_id": "CWD-0285",
-          "skill_name": "cwd-authz",
+          "cwd_id": "CWD-1031",
+          "skill_name": "",
           "priority_score": 0.92,
           "rationale": "鉴权边界复杂且高风险入口集中",
           "evidence_paths": ["src/auth", "src/user"]

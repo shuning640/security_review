@@ -69,6 +69,72 @@ class PhasedSecurityAnalyzer:
             return entries[0]
         return {}
 
+    @staticmethod
+    def _iter_tool_parts(payload: Any):
+        stack = [payload]
+        while stack:
+            item = stack.pop()
+            if isinstance(item, dict):
+                if item.get("type") == "tool":
+                    yield item
+                for value in item.values():
+                    if isinstance(value, (dict, list)):
+                        stack.append(value)
+            elif isinstance(item, list):
+                for value in item:
+                    if isinstance(value, (dict, list)):
+                        stack.append(value)
+
+    @staticmethod
+    def _extract_skill_name_from_tool_part(tool_part: Dict[str, Any]) -> str:
+        state = tool_part.get("state", {}) if isinstance(tool_part.get("state"), dict) else {}
+        candidates = []
+        for key in ("input", "args", "parameters", "result", "output", "data"):
+            value = state.get(key)
+            if isinstance(value, dict):
+                candidates.append(value)
+
+        for candidate in candidates:
+            for skill_key in ("name", "skill_name", "skillName", "skill"):
+                skill_name = candidate.get(skill_key)
+                if isinstance(skill_name, str) and skill_name.strip():
+                    return skill_name.strip()
+        return ""
+
+    def _audit_skill_usage(self, session_history: List[Dict[str, Any]], expected_skills: List[str]) -> Dict[str, Any]:
+        expected = [s for s in expected_skills if isinstance(s, str) and s.strip()]
+        tool_parts = [part for part in self._iter_tool_parts(session_history) if part.get("tool") == "skill"]
+
+        attempted_skills = set()
+        completed_skills = set()
+        errored_skills = set()
+        status_counts = {"completed": 0, "error": 0, "running": 0, "pending": 0, "unknown": 0}
+
+        for part in tool_parts:
+            state = part.get("state", {}) if isinstance(part.get("state"), dict) else {}
+            status = str(state.get("status", "unknown")).lower()
+            if status not in status_counts:
+                status = "unknown"
+            status_counts[status] += 1
+
+            skill_name = self._extract_skill_name_from_tool_part(part)
+            if skill_name:
+                attempted_skills.add(skill_name)
+                if status == "completed":
+                    completed_skills.add(skill_name)
+                if status == "error":
+                    errored_skills.add(skill_name)
+
+        return {
+            "expected_skills": expected,
+            "skill_tool_calls": len(tool_parts),
+            "status_counts": status_counts,
+            "attempted_skills": sorted(attempted_skills),
+            "completed_skills": sorted(completed_skills),
+            "errored_skills": sorted(errored_skills),
+            "skill_tool_observed": len(tool_parts) > 0,
+        }
+
     def _run_single_module_phase345(
         self,
         index: int,
@@ -97,7 +163,7 @@ class PhasedSecurityAnalyzer:
             )
             self.output_manager.save_text(f"phase3_module_{index}_prompt.txt", prompt3)
             response3 = sub_session.send_message(prompt=prompt3)
-            self.output_manager.save_json(f"phase3_module_{index}_response.json", response3)
+            # self.output_manager.save_json(f"phase3_module_{index}_response.json", response3)
             ok3, parsed3 = self._parse_phase_response(response3, f"phase3_module_{index}")
             if not ok3:
                 raise PhaseParseError(f"phase3 parse failed for module '{module_name}'")
@@ -122,7 +188,7 @@ class PhasedSecurityAnalyzer:
             )
             self.output_manager.save_text(f"phase4_module_{index}_prompt.txt", prompt4)
             response4 = sub_session.send_message(prompt=prompt4)
-            self.output_manager.save_json(f"phase4_module_{index}_response.json", response4)
+            # self.output_manager.save_json(f"phase4_module_{index}_response.json", response4)
             ok4, parsed4 = self._parse_phase_response(response4, f"phase4_module_{index}")
             if not ok4:
                 raise PhaseParseError(f"phase4 parse failed for module '{module_name}'")
@@ -144,10 +210,22 @@ class PhasedSecurityAnalyzer:
             )
             self.output_manager.save_text(f"phase5_module_{index}_prompt.txt", prompt5)
             response5 = sub_session.send_message(prompt=prompt5)
-            self.output_manager.save_json(f"phase5_module_{index}_response.json", response5)
+            # self.output_manager.save_json(f"phase5_module_{index}_response.json", response5)
             ok5, parsed5 = self._parse_phase_response(response5, f"phase5_module_{index}")
             if not ok5:
                 raise PhaseParseError(f"phase5 parse failed for module '{module_name}'")
+
+            session_history = sub_session.get_session_info()
+            serializable_history = [x.model_dump(mode="json", warnings=False) for x in session_history]
+            # self.output_manager.save_json(f"phase5_module_{index}_session_messages.json", serializable_history)
+
+            expected_skills = [
+                item.get("skill_name", "")
+                for item in phase4_selected.get("cwd_rankings", [])
+                if isinstance(item, dict)
+            ]
+            skill_audit = self._audit_skill_usage(serializable_history, expected_skills)
+            # self.output_manager.save_json(f"phase5_module_{index}_skill_audit.json", skill_audit)
 
             phase5_selected = self._pick_module_entry(parsed5.get("module_defects", []), module_name)
             if not phase5_selected:
@@ -155,6 +233,30 @@ class PhasedSecurityAnalyzer:
                     "module_name": module_name,
                     "defects": [],
                 }
+
+            attempted_skills = set(skill_audit.get("attempted_skills", []))
+            completed_skills = set(skill_audit.get("completed_skills", []))
+            skill_tool_observed = bool(skill_audit.get("skill_tool_observed", False))
+            for defect in phase5_selected.get("defects", []):
+                skill_name = str(defect.get("skill_name", "")).strip()
+                if skill_name and skill_name in completed_skills:
+                    defect["skill_load_status"] = "loaded_verified"
+                elif skill_name and skill_name in attempted_skills:
+                    defect["skill_load_status"] = "failed_verified"
+                elif skill_tool_observed:
+                    defect["skill_load_status"] = "unknown_unmatched_trace"
+                else:
+                    defect["skill_load_status"] = "unknown_no_trace"
+
+            phase5_selected["skill_audit"] = {
+                "skill_tool_observed": skill_audit.get("skill_tool_observed", False),
+                "skill_tool_calls": skill_audit.get("skill_tool_calls", 0),
+                "expected_skills": skill_audit.get("expected_skills", []),
+                "attempted_skills": skill_audit.get("attempted_skills", []),
+                "completed_skills": skill_audit.get("completed_skills", []),
+                "errored_skills": skill_audit.get("errored_skills", []),
+                "status_counts": skill_audit.get("status_counts", {}),
+            }
             self.output_manager.save_json(f"phase5_module_{index}_result.json", phase5_selected)
 
             return index, phase3_selected, phase4_selected, phase5_selected
@@ -207,7 +309,7 @@ class PhasedSecurityAnalyzer:
         self.output_manager.save_text("phase1_skill_bootstrap_prompt.txt", prompt)
 
         response = self.session_manager.send_message(prompt=prompt)
-        self.output_manager.save_json("phase1_skill_bootstrap_response.json", response)
+        # self.output_manager.save_json("phase1_skill_bootstrap_response.json", response)
         success, result = self._parse_phase_response(response, "phase1_skill_bootstrap")
         if not success:
             error_payload = {
@@ -258,7 +360,7 @@ class PhasedSecurityAnalyzer:
         self.output_manager.save_text("phase2_prompt.txt", prompt)
 
         response = self.session_manager.send_message(prompt=prompt)
-        self.output_manager.save_json("phase2_response.json", response)
+        # self.output_manager.save_json("phase2_response.json", response)
         success, result = self._parse_phase_response(response, "phase2")
         if not success:
             error_payload = {
@@ -336,6 +438,9 @@ class PhasedSecurityAnalyzer:
                     "low": 0,
                     "review_completed": True,
                     "module_failures": 0,
+                    "modules_with_skill_tool_trace": 0,
+                    "modules_without_skill_tool_trace": 0,
+                    "defects_with_loaded_verified_skill": 0,
                 },
             }
             self.output_manager.save_json("phase3_result.json", phase3_result)
@@ -407,6 +512,9 @@ class PhasedSecurityAnalyzer:
         pairs_selected = sum(len(entry.get("cwd_rankings", [])) for entry in phase4_items)
 
         high = medium = low = total_defects = 0
+        modules_with_skill_tool_trace = 0
+        modules_without_skill_tool_trace = 0
+        defects_with_loaded_verified_skill = 0
         for entry in phase5_items:
             defects = entry.get("defects", [])
             total_defects += len(defects)
@@ -418,6 +526,15 @@ class PhasedSecurityAnalyzer:
                     medium += 1
                 elif level == "LOW":
                     low += 1
+
+                if str(defect.get("skill_load_status", "")) == "loaded_verified":
+                    defects_with_loaded_verified_skill += 1
+
+            audit = entry.get("skill_audit", {}) if isinstance(entry, dict) else {}
+            if audit.get("skill_tool_observed", False):
+                modules_with_skill_tool_trace += 1
+            else:
+                modules_without_skill_tool_trace += 1
 
         phase3_result = {
             "module_risk_analysis": phase3_items,
@@ -448,6 +565,9 @@ class PhasedSecurityAnalyzer:
                 "low": low,
                 "review_completed": True,
                 "module_failures": len(failures),
+                "modules_with_skill_tool_trace": modules_with_skill_tool_trace,
+                "modules_without_skill_tool_trace": modules_without_skill_tool_trace,
+                "defects_with_loaded_verified_skill": defects_with_loaded_verified_skill,
             },
         }
 
