@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import time 
 import tempfile
+from datetime import datetime
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["NO_PROXY"] = "127.0.0.1,7.185.124.169,7.192.168.161,localhost,*.huawei.com"
 
@@ -887,6 +888,9 @@ def main():
             'scan_scope': analysis_summary['scan_scope'],
         }
 
+        phase7_started_at = datetime.now().isoformat()
+        phase7_start_time = time.time()
+
         kept_findings, excluded_findings, filter_stats = apply_findings_filter_with_shared_session(
             original_findings,
             pr_context,
@@ -912,6 +916,18 @@ def main():
             'filtering_summary': filter_stats,
         }
         output_manager.save_json('phase7_result.json', final_defects)
+        output_manager.save_json('phase7_metadata.json', {
+            'phase': 'phase7',
+            'name': 'findings_filtering',
+            'status': 'success',
+            'started_at': phase7_started_at,
+            'ended_at': datetime.now().isoformat(),
+            'duration_seconds': time.time() - phase7_start_time,
+            'prompt_file': None,
+            'response_file': None,
+            'result_file': 'phase7_result.json',
+            'error_message': None,
+        })
 
         if use_phased_analysis and isinstance(results, dict):
             results.setdefault('phased_results', {})['phase7'] = final_defects
