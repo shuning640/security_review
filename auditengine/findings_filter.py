@@ -9,14 +9,12 @@ import os
 from datetime import datetime
 import sys
 
-from claudecode.unified_output_manager import UnifiedOutputManager, NoOpOutputManager
+from auditengine.unified_output_manager import UnifiedOutputManager, NoOpOutputManager
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-# from claudecode.claude_api_client import ClaudeAPIClient
-from claudecode.session_manager import OpenCodeSessionManager
-from claudecode.constants import DEFAULT_CLAUDE_MODEL, DEFAULT_CLAUDE_PROVIDER
-from claudecode.logger import get_logger
-from claudecode.json_parser import parse_json_with_fallbacks
+from auditengine.session_manager import OpenCodeSessionManager
+from auditengine.constants import DEFAULT_MODEL_ID, DEFAULT_PROVIDER_ID
+from auditengine.logger import get_logger
+from auditengine.json_parser import parse_json_with_fallbacks
 
 logger = get_logger(__name__)
 
@@ -26,7 +24,7 @@ class FilterStats:
     """Statistics about the filtering process."""
     total_findings: int = 0
     hard_excluded: int = 0
-    claude_excluded: int = 0
+    ai_excluded: int = 0
     kept_findings: int = 0
     exclusion_breakdown: Dict[str, int] = field(default_factory=dict)
     confidence_scores: List[float] = field(default_factory=list)
@@ -391,10 +389,10 @@ class FindingsFilter:
     
     def __init__(self, 
                  use_hard_exclusions: bool = True,
-                 use_claude_filtering: bool = True,
-                 model: str = DEFAULT_CLAUDE_MODEL,
+                 use_ai_filtering: bool = True,
+                 model: str = DEFAULT_MODEL_ID,
                  custom_filtering_instructions: Optional[str] = None,
-                 provider_id: str = DEFAULT_CLAUDE_PROVIDER,
+                 provider_id: str = DEFAULT_PROVIDER_ID,
                  host: Optional[str] = None,
                  timeout_seconds: Optional[int] = None,
                  output_manager: Optional[UnifiedOutputManager] = None,
@@ -403,8 +401,8 @@ class FindingsFilter:
         
         Args:
             use_hard_exclusions: Whether to apply hard exclusion rules
-            use_claude_filtering: Whether to use Claude API for filtering
-            model: Claude model to use for filtering
+            use_ai_filtering: Whether to use AI filtering
+            model: Model ID to use for filtering
             custom_filtering_instructions: Optional custom filtering instructions
             provider_id: Provider ID for OpenCode
             host: OpenCode server address
@@ -414,7 +412,7 @@ class FindingsFilter:
                                      the filter will use this session instead of creating a new one)
         """
         self.use_hard_exclusions = use_hard_exclusions
-        self.use_claude_filtering = use_claude_filtering
+        self.use_ai_filtering = use_ai_filtering
         self.custom_filtering_instructions = custom_filtering_instructions
         self.owns_session = False  # Whether this filter owns and should close the session
         
@@ -422,7 +420,7 @@ class FindingsFilter:
         self.session_manager = None
         self.finding_analyzer = None
         
-        if self.use_claude_filtering:
+        if self.use_ai_filtering:
             try:
                 # Use external session manager if provided, otherwise create new one
                 if external_session_manager is not None:
@@ -458,7 +456,7 @@ class FindingsFilter:
                 self.session_manager = None
                 self.finding_analyzer = None
                 self.owns_session = False
-                self.use_claude_filtering = False
+                self.use_ai_filtering = False
     
     def close(self):
         """Close the session if this filter owns it."""
@@ -488,7 +486,7 @@ class FindingsFilter:
         """Filter security findings to remove false positives.
         
         Args:
-            findings: List of security findings from Claude Code audit
+            findings: List of security findings from automated audit
             pr_context: Optional PR context for better analysis
             
         Returns:
@@ -540,11 +538,11 @@ class FindingsFilter:
         else:
             findings_after_hard = [(i, f) for i, f in enumerate(findings)]
         
-        # Step 2: Apply Claude API filtering if enabled
-        findings_after_claude = []
-        excluded_claude = []
+        # Step 2: Apply AI filtering if enabled
+        findings_after_ai = []
+        excluded_ai = []
                 
-        if self.use_claude_filtering and self.finding_analyzer and findings_after_hard:
+        if self.use_ai_filtering and self.finding_analyzer and findings_after_hard:
             logger.info(f"Batch processing {len(findings_after_hard)} findings through OpenCode Session Manager")
 
             candidate_findings = [finding for _, finding in findings_after_hard]
@@ -573,7 +571,7 @@ class FindingsFilter:
                             'confidence_score': 10.0,
                             'justification': 'Batch decision missing; keeping finding by fail-open strategy',
                         }
-                        findings_after_claude.append(enriched_finding)
+                        findings_after_ai.append(enriched_finding)
                         stats.kept_findings += 1
                         continue
 
@@ -592,7 +590,7 @@ class FindingsFilter:
                     stats.confidence_scores.append(confidence)
 
                     if not keep_finding:
-                        excluded_claude.append({
+                        excluded_ai.append({
                             "finding": finding,
                             "confidence_score": confidence,
                             "exclusion_reason": exclusion_reason or f"Low confidence score: {confidence}",
@@ -601,7 +599,7 @@ class FindingsFilter:
                             "call_chain_summary": call_chain_summary,
                             "filter_stage": "opencode_session_batch"
                         })
-                        stats.claude_excluded += 1
+                        stats.ai_excluded += 1
                     else:
                         enriched_finding = finding.copy()
                         enriched_finding['_filter_metadata'] = {
@@ -610,7 +608,7 @@ class FindingsFilter:
                             'checked_paths': checked_paths,
                             'call_chain_summary': call_chain_summary,
                         }
-                        findings_after_claude.append(enriched_finding)
+                        findings_after_ai.append(enriched_finding)
                         stats.kept_findings += 1
             else:
                 logger.warning(f"Batch finding analyzer call failed: {error_msg}")
@@ -620,7 +618,7 @@ class FindingsFilter:
                         'confidence_score': 10.0,
                         'justification': f'OpenCode batch analysis failed: {error_msg}',
                     }
-                    findings_after_claude.append(enriched_finding)
+                    findings_after_ai.append(enriched_finding)
                     stats.kept_findings += 1
         else:
             # Filtering disabled or no analyzer - keep all findings from hard filter
@@ -630,25 +628,25 @@ class FindingsFilter:
                     'confidence_score': 10.0,  # Default high confidence
                     'justification': 'OpenCode filtering disabled',
                 }
-                findings_after_claude.append(enriched_finding)
+                findings_after_ai.append(enriched_finding)
                 stats.kept_findings += 1
         
         # Combine all excluded findings
-        all_excluded = excluded_hard + excluded_claude
+        all_excluded = excluded_hard + excluded_ai
         
         # Calculate final statistics
         stats.runtime_seconds = time.time() - start_time
         
         # Build filtered results
         filtered_results = {
-            "filtered_findings": findings_after_claude,
+            "filtered_findings": findings_after_ai,
             "excluded_findings": all_excluded,
             "analysis_summary": {
                 "total_findings": stats.total_findings,
                 "kept_findings": stats.kept_findings,
                 "excluded_findings": len(all_excluded),
                 "hard_excluded": stats.hard_excluded,
-                "claude_excluded": stats.claude_excluded,
+                "ai_excluded": stats.ai_excluded,
                 "exclusion_breakdown": stats.exclusion_breakdown,
                 "average_confidence": sum(stats.confidence_scores) / len(stats.confidence_scores) if stats.confidence_scores else None,
                 "runtime_seconds": stats.runtime_seconds

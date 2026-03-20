@@ -16,7 +16,7 @@ def get_pr_diff(pr_data):
   return pr_diff
 
 def get_security_audit_prompt(pr_data, pr_diff=None, include_diff=True, custom_scan_instructions=None):
-    """Generate security audit prompt for Claude Code.
+    """Generate security audit prompt for the analysis runtime.
     
     Args:
         pr_data: PR data dictionary from GitHub API

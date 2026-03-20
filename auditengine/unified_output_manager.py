@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from datetime import datetime
-from claudecode.logger import get_logger
+from auditengine.logger import get_logger
 
 logger = get_logger(__name__)
 

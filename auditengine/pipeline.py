@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Simplified PR Security Audit for GitHub Actions
-Runs Claude Code security audit on current working directory and outputs findings to stdout
+Runs security audit on current working directory and outputs findings to stdout
 """
 
 import os
@@ -19,21 +19,21 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["NO_PROXY"] = "127.0.0.1,7.185.124.169,7.192.168.161,localhost,*.huawei.com"
 
 # Import existing components we can reuse
-from claudecode.prompts_utils import get_security_audit_prompt
-from claudecode.findings_filter import FindingsFilter
-from claudecode.json_parser import parse_json_with_fallbacks
-from claudecode.constants import (
+from auditengine.prompts_utils import get_security_audit_prompt
+from auditengine.findings_filter import FindingsFilter
+from auditengine.json_parser import parse_json_with_fallbacks
+from auditengine.constants import (
     EXIT_CONFIGURATION_ERROR,
     EXIT_SUCCESS,
     EXIT_GENERAL_ERROR,
     SUBPROCESS_TIMEOUT
 )
-from claudecode.logger import get_logger
+from auditengine.logger import get_logger
 
 # Import phased analysis components
-from claudecode.session_manager import OpenCodeSessionManager, OpenCodeServerRuntime
-from claudecode.phased_analyzer import PhasedSecurityAnalyzer
-from claudecode.unified_output_manager import UnifiedOutputManager
+from auditengine.session_manager import OpenCodeSessionManager, OpenCodeServerRuntime
+from auditengine.phased_analyzer import PhasedSecurityAnalyzer
+from auditengine.unified_output_manager import UnifiedOutputManager
 
 logger = get_logger(__name__)
 
@@ -243,14 +243,14 @@ class RepositoryScopeClient:
         }
 
 
-class SimpleClaudeRunner:
-    """Simplified Claude Code runner for GitHub Actions."""
+class SimpleAuditRunner:
+    """Simplified security audit runner for CI environments."""
     
     def __init__(self, timeout_minutes: Optional[int] = None):
-        """Initialize Claude runner.
+        """Initialize audit runner.
         
         Args:
-            timeout_minutes: Timeout for Claude execution (defaults to SUBPROCESS_TIMEOUT)
+            timeout_minutes: Timeout for runtime execution (defaults to SUBPROCESS_TIMEOUT)
         """
         if timeout_minutes is not None:
             self.timeout_seconds = timeout_minutes * 60
@@ -338,7 +338,7 @@ class SimpleClaudeRunner:
                     logger.warning(f"关闭临时server时出错: {str(e)}")
     
     def run_security_audit(self, repo_dir: Path, prompt: str) -> Tuple[bool, str, Dict[str, Any]]:
-        """Run Claude Code security audit.
+        """Run security audit via analysis runtime.
         
         Args:
             repo_dir: Path to repository directory
@@ -360,7 +360,7 @@ class SimpleClaudeRunner:
             temp_prompt_path = temp_prompt_file.name
 
         try:
-            # Construct Claude Code command
+            # Construct analysis runtime command
             cmd =[
                 'opencode.cmd', 'run',
                 'Please review the attached security audit prompt.', # 触发执行的一句话 message
@@ -368,7 +368,7 @@ class SimpleClaudeRunner:
                 '-f', temp_prompt_path,
             ]
             
-            # Run Claude Code with retry logic
+            # Run analysis runtime with retry logic
             NUM_RETRIES = 3
             for attempt in range(NUM_RETRIES):
                 result = subprocess.run(
@@ -383,7 +383,7 @@ class SimpleClaudeRunner:
                 
                 if result.returncode != 0:
                     if attempt == NUM_RETRIES - 1:
-                        error_details = f"Claude Code execution failed with return code {result.returncode}\n"
+                        error_details = f"Analysis runtime execution failed with return code {result.returncode}\n"
                         error_details += f"Stderr: {result.stderr}\n"
                         error_details += f"Stdout: {result.stdout[:500]}..."  # First 500 chars
                         return False, error_details, {}
@@ -393,7 +393,7 @@ class SimpleClaudeRunner:
                         continue  # Retry
                 
                 # Parse JSON output
-                success, parsed_result = parse_json_with_fallbacks(result.stdout, "Claude Code output")
+                success, parsed_result = parse_json_with_fallbacks(result.stdout, "analysis runtime output")
                 
                 if success:
                     # Check for "Prompt is too long" error that should trigger retry without diff
@@ -418,34 +418,34 @@ class SimpleClaudeRunner:
                     if attempt == 0:
                         continue  # Retry once
                     else:
-                        return False, "Failed to parse Claude output", {}
+                        return False, "Failed to parse runtime output", {}
             
             return False, "Unexpected error in retry logic", {}
             
         except subprocess.TimeoutExpired:
-            return False, f"Claude Code execution timed out after {self.timeout_seconds // 60} minutes", {}
+            return False, f"Analysis runtime execution timed out after {self.timeout_seconds // 60} minutes", {}
         except Exception as e:
-            return False, f"Claude Code execution error: {str(e)}", {}
+            return False, f"Analysis runtime execution error: {str(e)}", {}
     
-    def _extract_security_findings(self, claude_output: Any) -> Dict[str, Any]:
-        """Extract security findings from Claude's JSON response."""
-        if isinstance(claude_output, dict):
-            # Only accept Claude Code wrapper with result field
+    def _extract_security_findings(self, runtime_output: Any) -> Dict[str, Any]:
+        """Extract security findings from runtime JSON response."""
+        if isinstance(runtime_output, dict):
+            # Only accept runtime wrapper with result field
             # Direct format without wrapper is not supported
-            if 'findings' in claude_output:
-                return claude_output
+            if 'findings' in runtime_output:
+                return runtime_output
 
-            if 'result' in claude_output:
-                result_text = claude_output['result']
+            if 'result' in runtime_output:
+                result_text = runtime_output['result']
                 if isinstance(result_text, str):
                     # Try to extract JSON from the result text
-                    success, result_json = parse_json_with_fallbacks(result_text, "Claude result text")
+                    success, result_json = parse_json_with_fallbacks(result_text, "runtime result text")
                     if success and result_json and 'findings' in result_json:
                         return result_json
                 elif isinstance(result_text, dict) and 'findings' in result_text:
                     return result_text
-            if claude_output.get('type') == 'text' and 'part' in claude_output:
-                part = claude_output['part']
+            if runtime_output.get('type') == 'text' and 'part' in runtime_output:
+                part = runtime_output['part']
                 if isinstance(part, dict) and part.get('type') == 'text' and 'text' in part:
                     success, result_json = parse_json_with_fallbacks(part['text'], "Opencode text part")
                     if success and result_json and 'findings' in result_json:
@@ -463,8 +463,8 @@ class SimpleClaudeRunner:
         }
     
     
-    def validate_claude_available(self) -> Tuple[bool, str]:
-        """Validate that Claude Code is available."""
+    def validate_runtime_available(self) -> Tuple[bool, str]:
+        """Validate that runtime command is available."""
         try:
             result = subprocess.run(
                 ['opencode', '--version'],
@@ -477,7 +477,7 @@ class SimpleClaudeRunner:
             if result.returncode == 0:
                 return True, ""
             else:
-                error_msg = f"Claude Code returned exit code {result.returncode}"
+                error_msg = f"Runtime command returned exit code {result.returncode}"
                 if result.stderr:
                     error_msg += f". Stderr: {result.stderr}"
                 if result.stdout:
@@ -485,11 +485,11 @@ class SimpleClaudeRunner:
                 return False, error_msg
                 
         except subprocess.TimeoutExpired:
-            return False, "Claude Code command timed out"
+            return False, "Runtime command timed out"
         except FileNotFoundError:
-            return False, "Claude Code is not installed or not in PATH"
+            return False, "Runtime command is not installed or not in PATH"
         except Exception as e:
-            return False, f"Failed to check Claude Code: {str(e)}"
+            return False, f"Failed to check runtime command: {str(e)}"
       
 
 def get_environment_config() -> Tuple[str, str, int]:
@@ -544,8 +544,8 @@ def get_repo_directory() -> Path:
     return repo_dir
 
 
-def initialize_clients(scan_scope: str) -> Tuple[Any, SimpleClaudeRunner]:
-    """Initialize scope client and Claude runner."""
+def initialize_clients(scan_scope: str) -> Tuple[Any, SimpleAuditRunner]:
+    """Initialize scope client and audit runner."""
     if scan_scope == 'pr':
         try:
             scope_client = GitHubActionClient()
@@ -555,11 +555,11 @@ def initialize_clients(scan_scope: str) -> Tuple[Any, SimpleClaudeRunner]:
         scope_client = RepositoryScopeClient()
 
     try:
-        claude_runner = SimpleClaudeRunner()
+        audit_runner = SimpleAuditRunner()
     except Exception as e:
-        raise ConfigurationError(f'Failed to initialize Claude runner: {str(e)}')
+        raise ConfigurationError(f'Failed to initialize audit runner: {str(e)}')
 
-    return scope_client, claude_runner
+    return scope_client, audit_runner
 
 
 def initialize_findings_filter(custom_filtering_instructions: Optional[str] = None, 
@@ -577,14 +577,14 @@ def initialize_findings_filter(custom_filtering_instructions: Optional[str] = No
         ConfigurationError: If filter initialization fails
     """
     try:
-        # Check if we should use Claude API filtering
-        use_claude_filtering = os.environ.get('ENABLE_OPENCODE_FILTERING', 'true').lower() == 'true'
+        # Check if we should use AI filtering
+        use_ai_filtering = os.environ.get('ENABLE_OPENCODE_FILTERING', 'true').lower() == 'true'
         
-        if use_claude_filtering:
+        if use_ai_filtering:
             # Use full filtering with external session manager if provided
             return FindingsFilter(
                 use_hard_exclusions=True,
-                use_claude_filtering=True,
+                use_ai_filtering=True,
                 custom_filtering_instructions=custom_filtering_instructions,
                 external_session_manager=external_session_manager
             )
@@ -592,7 +592,7 @@ def initialize_findings_filter(custom_filtering_instructions: Optional[str] = No
             # Fallback to filtering with hard rules only
             return FindingsFilter(
                 use_hard_exclusions=False,
-                use_claude_filtering=True,
+                use_ai_filtering=True,
                 external_session_manager=external_session_manager
             )
     except Exception as e:
@@ -617,16 +617,16 @@ def apply_findings_filter_with_shared_session(original_findings: List[Dict[str, 
     """
     # Determine filtering configuration from environment
     use_hard_exclusions = os.environ.get('ENABLE_HARD_EXCLUSIONS', 'true').lower() == 'true'
-    use_claude_filtering = os.environ.get('ENABLE_OPENCODE_FILTERING', 'true').lower() == 'true'
+    use_ai_filtering = os.environ.get('ENABLE_OPENCODE_FILTERING', 'true').lower() == 'true'
     
     # Create filter based on availability
     try:
-        if shared_session is not None and use_claude_filtering:
+        if shared_session is not None and use_ai_filtering:
             logger.info("Creating filter with shared session")
             # Use shared session for filtering (session has already been created)
             active_filter = FindingsFilter(
                 use_hard_exclusions=use_hard_exclusions,
-                use_claude_filtering=use_claude_filtering,
+                use_ai_filtering=use_ai_filtering,
                 external_session_manager=shared_session,
                 output_manager=output_manager,
                 custom_filtering_instructions=custom_filtering_instructions
@@ -634,12 +634,12 @@ def apply_findings_filter_with_shared_session(original_findings: List[Dict[str, 
         else:
             if shared_session is None:
                 logger.info("Creating standalone filter (no shared session)")
-            if not use_claude_filtering:
+            if not use_ai_filtering:
                 logger.info("Creating filter with AI filtering disabled")
             # Create standalone filter with its own session
             active_filter = FindingsFilter(
                 use_hard_exclusions=use_hard_exclusions,
-                use_claude_filtering=use_claude_filtering,
+                use_ai_filtering=use_ai_filtering,
                 output_manager=output_manager,
                 custom_filtering_instructions=custom_filtering_instructions
             )
@@ -738,11 +738,11 @@ def main():
             with open(scan_file, 'r', encoding='utf-8') as f:
                 custom_scan_instructions = f.read()
 
-        scope_client, claude_runner = initialize_clients(scan_scope)
+        scope_client, audit_runner = initialize_clients(scan_scope)
 
-        claude_ok, claude_error = claude_runner.validate_claude_available()
-        if not claude_ok:
-            print(json.dumps({'error': f'Claude Code not available: {claude_error}'}))
+        runtime_ok, runtime_error = audit_runner.validate_runtime_available()
+        if not runtime_ok:
+            print(json.dumps({'error': f'Analysis runtime not available: {runtime_error}'}))
             sys.exit(EXIT_GENERAL_ERROR)
 
         if scan_scope == 'pr':
@@ -760,7 +760,7 @@ def main():
             shared_server_runtime.start()
 
             shared_session_manager = OpenCodeSessionManager(
-                timeout_seconds=claude_runner.timeout_seconds,
+                timeout_seconds=audit_runner.timeout_seconds,
             )
             shared_session_manager.create_session()
             output_manager = UnifiedOutputManager(
@@ -772,7 +772,7 @@ def main():
             sys.exit(EXIT_GENERAL_ERROR)
 
         if use_phased_analysis:
-            success, error_msg, results = claude_runner.run_phased_security_audit_with_session(
+            success, error_msg, results = audit_runner.run_phased_security_audit_with_session(
                 repo_dir,
                 pr_data,
                 custom_scan_instructions=custom_scan_instructions,
@@ -785,7 +785,7 @@ def main():
                 custom_scan_instructions=custom_scan_instructions,
                 include_diff=(scan_scope == 'pr')
             )
-            success, error_msg, results = claude_runner.run_security_audit(repo_dir, prompt)
+            success, error_msg, results = audit_runner.run_security_audit(repo_dir, prompt)
 
         if not success:
             print(json.dumps({'error': f'Security audit failed: {error_msg}'}))
@@ -812,6 +812,7 @@ def main():
 
         phase7_started_at = datetime.now().isoformat()
         phase7_start_time = time.time()
+        phase7_model_id, phase7_provider_id = shared_session_manager.get_effective_model_provider()
 
         kept_findings, excluded_findings, filter_stats = apply_findings_filter_with_shared_session(
             original_findings,
@@ -845,6 +846,8 @@ def main():
             'response_file': None,
             'result_file': 'phase7_result.json',
             'error_message': None,
+            'model_id': phase7_model_id,
+            'provider_id': phase7_provider_id,
         }
 
         if use_phased_analysis and isinstance(results, dict):

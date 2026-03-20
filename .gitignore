@@ -4,3 +4,4 @@ claudecode/.DS_Store
 __pycache__/
 claudecode/__pycache__/
 claudecode/prompts/__pycache__/
+example/

@@ -14,8 +14,8 @@ from opencode_ai import Opencode
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from claudecode.constants import DEFAULT_CLAUDE_MODEL, DEFAULT_CLAUDE_PROVIDER, DEFAULT_TIMEOUT_SECONDS
-from claudecode.logger import get_logger
+from auditengine.constants import DEFAULT_MODEL_ID, DEFAULT_PROVIDER_ID, DEFAULT_TIMEOUT_SECONDS
+from auditengine.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -27,11 +27,16 @@ class OpenCodeSessionManager:
         self,
         host: Optional[str] = None,
         timeout_seconds: Optional[int] = None,
-        model: str = DEFAULT_CLAUDE_MODEL,
-        provider_id: str = DEFAULT_CLAUDE_PROVIDER,
+        model: str = DEFAULT_MODEL_ID,
+        provider_id: str = DEFAULT_PROVIDER_ID,
         port: Optional[int] = None,
     ):
         self.timeout_seconds = timeout_seconds or DEFAULT_TIMEOUT_SECONDS
+        self.default_model = model
+        self.default_provider_id = provider_id
+        self.session_model = model
+        self.session_provider_id = provider_id
+        # Backward-compatible aliases
         self.model = model
         self.provider_id = provider_id
 
@@ -40,6 +45,15 @@ class OpenCodeSessionManager:
 
         self.session_id: Optional[str] = None
         self._closed = False
+
+    def get_effective_model_provider(
+        self,
+        model: Optional[str] = None,
+        provider_id: Optional[str] = None,
+    ) -> Tuple[str, str]:
+        effective_model = model or self.session_model or self.default_model
+        effective_provider = provider_id or self.session_provider_id or self.default_provider_id
+        return effective_model, effective_provider
 
     def _resolve_host_and_port(self, host: Optional[str], port: Optional[int]) -> Tuple[str, int]:
         env_port = os.environ.get("OPENCODE_PORT")
@@ -141,35 +155,60 @@ class OpenCodeSessionManager:
                 except Exception:
                     continue
 
-    def create_session(self) -> str:
+    def create_session(self, model: Optional[str] = None, provider_id: Optional[str] = None) -> str:
         try:
+            effective_model, effective_provider = self.get_effective_model_provider(model=model, provider_id=provider_id)
+            self.session_model = effective_model
+            self.session_provider_id = effective_provider
+            self.model = self.session_model
+            self.provider_id = self.session_provider_id
+
             session = self.client.session.create(extra_body={})
             self.session_id = session.id
             if not self.session_id:
                 raise ValueError("Failed to obtain session ID from OpenCode server")
-            logger.info(f"OpenCode session created successfully. ID: {self.session_id}")
+            logger.info(
+                f"OpenCode session created successfully. ID: {self.session_id}, "
+                f"model={self.session_model}, provider={self.session_provider_id}"
+            )
             return self.session_id
         except Exception as exc:
             logger.error(f"Failed to create OpenCode session: {exc}")
             raise Exception(f"Session creation failed: {exc}")
 
-    def send_message(self, prompt: str, system_prompt: Optional[str] = None) -> Dict[str, Any]:
+    def send_message(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        model: Optional[str] = None,
+        provider_id: Optional[str] = None,
+        tools: Optional[Dict[str, bool]] = None,
+    ) -> Dict[str, Any]:
         if not self.session_id:
             raise ValueError("No active session. Call create_session() first.")
 
         try:
+            effective_model, effective_provider = self.get_effective_model_provider(
+                model=model,
+                provider_id=provider_id,
+            )
             kwargs: Dict[str, Any] = {
                 "id": self.session_id,
-                "model_id": self.model,
-                "provider_id": self.provider_id,
+                "model_id": effective_model,
+                "provider_id": effective_provider,
                 "parts": [{"type": "text", "text": prompt}],
             }
             if system_prompt:
                 kwargs["system"] = system_prompt
+            if tools is not None:
+                kwargs["tools"] = tools
 
             response = self.client.session.chat(**kwargs)
             response_data = response.to_dict()
-            logger.info(f"Message sent successfully to session {self.session_id}")
+            logger.info(
+                f"Message sent successfully to session {self.session_id} "
+                f"(model={effective_model}, provider={effective_provider})"
+            )
             return response_data
         except Exception as exc:
             logger.error(f"Failed to send message to session {self.session_id}: {exc}")

@@ -1,4 +1,4 @@
-"""Logging configuration for ClaudeCode."""
+"""Logging configuration for the analysis engine."""
 
 import logging
 import sys

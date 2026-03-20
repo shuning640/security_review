@@ -8,17 +8,17 @@ from datetime import datetime
 from typing import Any, Dict, Optional, Tuple, List
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from claudecode.json_parser import parse_json_with_fallbacks
-from claudecode.logger import get_logger
-from claudecode.prompts import (
+from auditengine.json_parser import parse_json_with_fallbacks
+from auditengine.logger import get_logger
+from auditengine.prompts import (
     get_phase1_architecture_brief_prompt,
     get_phase2_context_study_prompt,
     get_phase3_comparative_analysis_prompt,
     get_phase4_cwd_routing_prompt,
     get_phase5_vulnerability_assessment_prompt,
 )
-from claudecode.session_manager import OpenCodeSessionManager
-from claudecode.unified_output_manager import UnifiedOutputManager, NoOpOutputManager
+from auditengine.session_manager import OpenCodeSessionManager
+from auditengine.unified_output_manager import UnifiedOutputManager, NoOpOutputManager
 
 logger = get_logger(__name__)
 
@@ -102,7 +102,7 @@ class PhasedSecurityAnalyzer:
                     return skill_name.strip()
         return ""
 
-    def _audit_skill_usage(self, session_history: List[Dict[str, Any]], expected_skills: List[str]) -> Dict[str, Any]:
+    def _audit_skill_usage(self, session_history: Any, expected_skills: List[str]) -> Dict[str, Any]:
         expected = [s for s in expected_skills if isinstance(s, str) and s.strip()]
         tool_parts = [part for part in self._iter_tool_parts(session_history) if part.get("tool") == "skill"]
 
@@ -145,12 +145,13 @@ class PhasedSecurityAnalyzer:
     ) -> Tuple[int, Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
         module_name = module.get("module_name", f"module_{index}")
         module_context = {"modules": [module]}
+        base_model, base_provider = self.session_manager.get_effective_model_provider()
 
         sub_session = OpenCodeSessionManager(
             host=self.session_manager.host,
             timeout_seconds=self.session_manager.timeout_seconds,
-            model=self.session_manager.model,
-            provider_id=self.session_manager.provider_id,
+            model=base_model,
+            provider_id=base_provider,
             port=self.session_manager.port,
         )
 
@@ -217,6 +218,7 @@ class PhasedSecurityAnalyzer:
                 raise PhaseParseError(f"phase5 parse failed for module '{module_name}'")
 
             session_history = sub_session.get_session_info()
+            # serializable_history = session_history
             serializable_history = [x.model_dump(mode="json", warnings=False) for x in session_history]
             # self.output_manager.save_json(f"module_{index}_phase5_session_messages.json", session_history)
             # self.output_manager.save_json(f"module_{index}_phase5_erializable_messages.json", serializable_history)
@@ -674,7 +676,13 @@ class PhasedSecurityAnalyzer:
         result_file: Optional[str] = None,
         error_message: Optional[str] = None,
         details: Optional[Dict[str, Any]] = None,
+        model_id: Optional[str] = None,
+        provider_id: Optional[str] = None,
     ) -> None:
+        effective_model, effective_provider = self.session_manager.get_effective_model_provider(
+            model=model_id,
+            provider_id=provider_id,
+        )
         metadata = {
             "phase": phase,
             "name": name,
@@ -686,6 +694,8 @@ class PhasedSecurityAnalyzer:
             "response_file": response_file,
             "result_file": result_file,
             "error_message": error_message,
+            "model_id": effective_model,
+            "provider_id": effective_provider,
         }
         if details is not None:
             metadata["details"] = details
