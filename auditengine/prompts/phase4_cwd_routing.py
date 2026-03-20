@@ -8,8 +8,7 @@ def get_phase4_cwd_routing_prompt(
     pr_data: dict,
     phase2_results: dict,
     phase3_results: dict,
-    cwd_catalog: dict,
-    custom_scan_instructions: Optional[str] = None,
+    cwd_catalog: dict
 ) -> str:
     """Generate phase-4 prompt for module × CWD priority routing."""
     repo_name = pr_data.get("head", {}).get("repo", {}).get("full_name", "unknown")
@@ -19,14 +18,6 @@ def get_phase4_cwd_routing_prompt(
     modules_context = json.dumps(modules, indent=2, ensure_ascii=False)
     risks_context = json.dumps(module_risks, indent=2, ensure_ascii=False)
     catalog_context = json.dumps(cwd_catalog, indent=2, ensure_ascii=False)
-
-    custom_section = ""
-    if custom_scan_instructions:
-        custom_section = f"""
-
-附加扫描要求：
-{custom_scan_instructions}
-"""
 
     return f"""你正在执行模块级安全分析的 Phase 4：CWD 路由规划。
 
@@ -81,5 +72,4 @@ CWD 分类目录：
 - 只输出 JSON。
 - 不要输出 Markdown 或解释文本。
 - priority_score 范围 [0,1]。
-{custom_section}
 """

@@ -2,7 +2,6 @@
 
 import json
 import time
-import os
 from pathlib import Path
 from datetime import datetime
 from typing import Any, Dict, Optional, Tuple, List
@@ -19,6 +18,7 @@ from auditengine.prompts import (
 )
 from auditengine.session_manager import OpenCodeSessionManager
 from auditengine.unified_output_manager import UnifiedOutputManager, NoOpOutputManager
+from auditengine.constants import PHASE_PARALLELISM
 
 logger = get_logger(__name__)
 
@@ -47,16 +47,11 @@ class PhasedSecurityAnalyzer:
         self.phase6_results: Dict[str, Any] = {}
         self.phase_metadata: Dict[str, Any] = {}
         self.repo_dir: Optional[Path] = None
-        self.custom_scan_instructions: Optional[str] = None
 
         logger.info(f"Phased analyzer initialized. Session dir: {self.session_dir}")
 
     def _get_phase_parallelism(self) -> int:
-        raw = os.environ.get("PHASE_PARALLELISM", "4")
-        try:
-            value = int(raw)
-        except ValueError:
-            value = 4
+        value = PHASE_PARALLELISM
         return max(1, min(value, 16))
 
     @staticmethod
@@ -145,7 +140,7 @@ class PhasedSecurityAnalyzer:
     ) -> Tuple[int, Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
         module_name = module.get("module_name", f"module_{index}")
         module_context = {"modules": [module]}
-        base_model, base_provider = self.session_manager.get_effective_model_provider()
+        base_model, base_provider = self.session_manager.model, self.session_manager.provider_id
 
         sub_session = OpenCodeSessionManager(
             host=self.session_manager.host,
@@ -160,8 +155,7 @@ class PhasedSecurityAnalyzer:
 
             prompt3 = get_phase3_comparative_analysis_prompt(
                 pr_data=pr_data,
-                phase2_results=module_context,
-                custom_scan_instructions=self.custom_scan_instructions,
+                phase2_results=module_context
             )
             self.output_manager.save_text(f"module_{index}_phase3_prompt.txt", prompt3)
             response3 = sub_session.send_message(prompt=prompt3)
@@ -185,8 +179,7 @@ class PhasedSecurityAnalyzer:
                 pr_data=pr_data,
                 phase2_results=module_context,
                 phase3_results={"module_risk_analysis": [phase3_selected]},
-                cwd_catalog=cwd_catalog,
-                custom_scan_instructions=self.custom_scan_instructions,
+                cwd_catalog=cwd_catalog
             )
             self.output_manager.save_text(f"module_{index}_phase4_prompt.txt", prompt4)
             response4 = sub_session.send_message(prompt=prompt4)
@@ -201,14 +194,13 @@ class PhasedSecurityAnalyzer:
                     "module_name": module_name,
                     "cwd_rankings": [],
                 }
-            self.output_manager.save_json(f"pmodule_{index}_hase4_result.json", phase4_selected)
+            self.output_manager.save_json(f"module_{index}_phase4_result.json", phase4_selected)
 
             prompt5 = get_phase5_vulnerability_assessment_prompt(
                 pr_data=pr_data,
                 phase2_results=module_context,
                 phase3_results={"module_risk_analysis": [phase3_selected]},
-                phase4_results={"module_cwd_priorities": [phase4_selected]},
-                custom_scan_instructions=self.custom_scan_instructions,
+                phase4_results={"module_cwd_priorities": [phase4_selected]}
             )
             self.output_manager.save_text(f"module_{index}_phase5_prompt.txt", prompt5)
             response5 = sub_session.send_message(prompt=prompt5)
@@ -270,13 +262,11 @@ class PhasedSecurityAnalyzer:
     def execute_phased_analysis(
         self,
         pr_data: Dict[str, Any],
-        custom_scan_instructions: Optional[str] = None,
         repo_dir: Optional[Path] = None,
     ) -> Dict[str, Any]:
         """Execute phases 1-6 and return aggregate data for phase-7 filtering."""
 
         self.repo_dir = repo_dir
-        self.custom_scan_instructions = custom_scan_instructions
 
         logger.info("=" * 80)
         logger.info("Starting full-repository phased analysis")
@@ -301,8 +291,7 @@ class PhasedSecurityAnalyzer:
         start_time = time.time()
 
         prompt = get_phase1_architecture_brief_prompt(
-            pr_data=pr_data,
-            custom_scan_instructions=self.custom_scan_instructions,
+            pr_data=pr_data
         )
         self.output_manager.save_text("phase1_architecture_prompt.txt", prompt)
 
@@ -369,13 +358,12 @@ class PhasedSecurityAnalyzer:
 
         prompt = get_phase2_context_study_prompt(
             pr_data=pr_data,
-            phase1_results=self.phase1_architecture_results,
-            custom_scan_instructions=self.custom_scan_instructions,
+            phase1_results=self.phase1_architecture_results
         )
         self.output_manager.save_text("phase2_prompt.txt", prompt)
 
         response = self.session_manager.send_message(prompt=prompt)
-        self.output_manager.save_json("phase2_response.json", response)
+        # self.output_manager.save_json("phase2_response.json", response)
         success, result = self._parse_phase_response(response, "phase2")
         if not success:
             error_payload = {
@@ -679,10 +667,8 @@ class PhasedSecurityAnalyzer:
         model_id: Optional[str] = None,
         provider_id: Optional[str] = None,
     ) -> None:
-        effective_model, effective_provider = self.session_manager.get_effective_model_provider(
-            model=model_id,
-            provider_id=provider_id,
-        )
+        effective_model = model_id or self.session_manager.model
+        effective_provider = provider_id or self.session_manager.provider_id
         metadata = {
             "phase": phase,
             "name": name,

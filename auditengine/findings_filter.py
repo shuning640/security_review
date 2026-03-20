@@ -214,11 +214,10 @@ class FindingAnalyzer:
                 for part in response_data['parts']:
                     if part.get('type') == 'text':
                         response_text += part.get('text', '')
-
-            self.output_manager.save_json(
-                f"{call_id}_response.json",
-                {"final_response_text": response_text, "raw_response": response_data}
-            )
+            # self.output_manager.save_json(
+            #     f"{call_id}_response.json",
+            #     {"final_response_text": response_text, "raw_response": response_data}
+            # )
 
             if not response_text:
                 return False, {}, "响应文本为空"

@@ -5,8 +5,7 @@ import json
 
 def get_phase2_context_study_prompt(
     pr_data: dict,
-    phase1_results: Optional[dict] = None,
-    custom_scan_instructions: Optional[str] = None,
+    phase1_results: Optional[dict] = None
 ) -> str:
     """Generate phase-2 prompt for full-repository module decomposition."""
 
@@ -18,14 +17,6 @@ def get_phase2_context_study_prompt(
         architecture_markdown = str(phase1_results.get("architecture_document_markdown", ""))
     if not architecture_markdown:
         architecture_markdown = json.dumps(phase1_results or {}, indent=2, ensure_ascii=False)
-
-    custom_section = ""
-    if custom_scan_instructions:
-        custom_section = f"""
-
-附加扫描要求：
-{custom_scan_instructions}
-"""
 
     return f"""你是一名资深应用安全工程师，正在对整个代码仓进行阶段化缺陷检测。
 
@@ -114,5 +105,4 @@ Step B - 判断层（基于 Step A 结果做模块归并与职责判断）：
 仅返回 JSON，不要输出 Markdown，不要输出代码块，不要附加解释文本。
 如果无法确定某字段，请返回空数组或 "unknown"，不要编造。
 如果 module_candidates 为空，则 modules 也必须为空，并在 notes 说明原因。
-{custom_section}
 """

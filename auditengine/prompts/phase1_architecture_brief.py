@@ -4,22 +4,13 @@ from typing import Optional
 
 
 def get_phase1_architecture_brief_prompt(
-    pr_data: dict,
-    custom_scan_instructions: Optional[str] = None,
+    pr_data: dict
 ) -> str:
     """Generate phase-1 prompt for repository architecture brief."""
 
     repo_name = pr_data.get("head", {}).get("repo", {}).get("full_name", "unknown")
     repo_path = pr_data.get("repository_path", "unknown")
     total_files = pr_data.get("changed_files", 0)
-
-    custom_section = ""
-    if custom_scan_instructions:
-        custom_section = f"""
-
-附加扫描要求：
-{custom_scan_instructions}
-"""
 
     return f"""你是一名资深软件架构师，正在执行阶段化安全检测流程的 Phase 1：软件设计文档生成。
 
@@ -56,5 +47,4 @@ def get_phase1_architecture_brief_prompt(
 - 仅输出 Markdown 文档正文，不要使用代码块包裹整篇文档。
 - 文档内容必须使用中文。
 - 路径必须是可定位的仓库真实路径。
-{custom_section}
 """

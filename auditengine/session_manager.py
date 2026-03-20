@@ -14,7 +14,15 @@ from opencode_ai import Opencode
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from auditengine.constants import DEFAULT_MODEL_ID, DEFAULT_PROVIDER_ID, DEFAULT_TIMEOUT_SECONDS
+from auditengine.constants import (
+    DEFAULT_MODEL_ID,
+    DEFAULT_PROVIDER_ID,
+    DEFAULT_TIMEOUT_SECONDS,
+    OPENCODE_API_URL,
+    OPENCODE_PORT,
+    OPENCODE_SERVER_BIN,
+    REPO_PATH,
+)
 from auditengine.logger import get_logger
 
 logger = get_logger(__name__)
@@ -32,11 +40,6 @@ class OpenCodeSessionManager:
         port: Optional[int] = None,
     ):
         self.timeout_seconds = timeout_seconds or DEFAULT_TIMEOUT_SECONDS
-        self.default_model = model
-        self.default_provider_id = provider_id
-        self.session_model = model
-        self.session_provider_id = provider_id
-        # Backward-compatible aliases
         self.model = model
         self.provider_id = provider_id
 
@@ -46,21 +49,11 @@ class OpenCodeSessionManager:
         self.session_id: Optional[str] = None
         self._closed = False
 
-    def get_effective_model_provider(
-        self,
-        model: Optional[str] = None,
-        provider_id: Optional[str] = None,
-    ) -> Tuple[str, str]:
-        effective_model = model or self.session_model or self.default_model
-        effective_provider = provider_id or self.session_provider_id or self.default_provider_id
-        return effective_model, effective_provider
-
     def _resolve_host_and_port(self, host: Optional[str], port: Optional[int]) -> Tuple[str, int]:
-        env_port = os.environ.get("OPENCODE_PORT")
-        default_port = int(env_port) if env_port and env_port.isdigit() else 4096
+        default_port = OPENCODE_PORT
         chosen_port = int(port) if port is not None else default_port
 
-        raw_host = (host or os.environ.get("OPENCODE_API_URL") or f"http://127.0.0.1:{chosen_port}").rstrip("/")
+        raw_host = (host or OPENCODE_API_URL or f"http://127.0.0.1:{chosen_port}").rstrip("/")
         parsed = urlparse(raw_host)
 
         # If host is missing scheme, assume http.
@@ -157,11 +150,10 @@ class OpenCodeSessionManager:
 
     def create_session(self, model: Optional[str] = None, provider_id: Optional[str] = None) -> str:
         try:
-            effective_model, effective_provider = self.get_effective_model_provider(model=model, provider_id=provider_id)
-            self.session_model = effective_model
-            self.session_provider_id = effective_provider
-            self.model = self.session_model
-            self.provider_id = self.session_provider_id
+            if model is not None:
+                self.model = model
+            if provider_id is not None:
+                self.provider_id = provider_id
 
             session = self.client.session.create(extra_body={})
             self.session_id = session.id
@@ -169,7 +161,7 @@ class OpenCodeSessionManager:
                 raise ValueError("Failed to obtain session ID from OpenCode server")
             logger.info(
                 f"OpenCode session created successfully. ID: {self.session_id}, "
-                f"model={self.session_model}, provider={self.session_provider_id}"
+                f"model={self.model}, provider={self.provider_id}"
             )
             return self.session_id
         except Exception as exc:
@@ -188,10 +180,8 @@ class OpenCodeSessionManager:
             raise ValueError("No active session. Call create_session() first.")
 
         try:
-            effective_model, effective_provider = self.get_effective_model_provider(
-                model=model,
-                provider_id=provider_id,
-            )
+            effective_model = model or self.model
+            effective_provider = provider_id or self.provider_id
             kwargs: Dict[str, Any] = {
                 "id": self.session_id,
                 "model_id": effective_model,
@@ -258,11 +248,10 @@ class OpenCodeServerRuntime:
 
     def __init__(self, repo_path: str, host: Optional[str] = None, port: Optional[int] = None):
         self.repo_path = repo_path
-        env_port = os.environ.get("OPENCODE_PORT")
-        default_port = int(env_port) if env_port and env_port.isdigit() else 4096
+        default_port = OPENCODE_PORT
         chosen_port = int(port) if port is not None else default_port
 
-        raw_host = (host or os.environ.get("OPENCODE_API_URL") or f"http://127.0.0.1:{chosen_port}").rstrip("/")
+        raw_host = (host or OPENCODE_API_URL or f"http://127.0.0.1:{chosen_port}").rstrip("/")
         parsed = urlparse(raw_host)
         if not parsed.scheme:
             raw_host = f"http://{raw_host}"
@@ -291,28 +280,19 @@ class OpenCodeServerRuntime:
             self._owns_server = False
             return
 
-        server_bin_candidates = ["opencode", "opencode.cwd"]
-        server_bin = os.environ.get("OPENCODE_SERVER_BIN")
-        if server_bin:
-            server_bin_candidates = [server_bin]
-
-        process = None
-        for candidate in server_bin_candidates:
-            cmd_candidate = [candidate, "serve", "--port", str(self.port)]
-            cmd = " ".join(cmd_candidate) if OpenCodeSessionManager._is_windows() else cmd_candidate
-            logger.info(f"Starting OpenCode server: {' '.join(cmd_candidate)}")
-            try:
-                process = subprocess.Popen(
-                    cmd,
-                    cwd=repo_abs_path,
-                    text=True,
-                    start_new_session=True,
-                    shell=OpenCodeSessionManager._is_windows(),
-                )
-                break
-            except FileNotFoundError:
-                process = None
-                continue
+        cmd_candidate = [OPENCODE_SERVER_BIN, "serve", "--port", str(self.port)]
+        cmd = " ".join(cmd_candidate) if OpenCodeSessionManager._is_windows() else cmd_candidate
+        logger.info(f"Starting OpenCode server: {' '.join(cmd_candidate)}")
+        try:
+            process = subprocess.Popen(
+                cmd,
+                cwd=repo_abs_path,
+                text=True,
+                start_new_session=True,
+                shell=OpenCodeSessionManager._is_windows(),
+            )
+        except FileNotFoundError:
+            process = None
 
         if process is None:
             raise RuntimeError("Failed to start OpenCode server: command not found (tried opencode, opencode.cwd)")
@@ -382,7 +362,7 @@ def get_session_manager(
 
 if __name__ == "__main__":
     try:
-        repo_path = os.environ.get("REPO_PATH")
+        repo_path = REPO_PATH
         repo_dir = Path(repo_path) if repo_path else Path.cwd()
         runtime = OpenCodeServerRuntime(repo_path=str(repo_dir))
         runtime.start()

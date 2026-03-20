@@ -5,8 +5,7 @@ import json
 
 def get_phase3_comparative_analysis_prompt(
     pr_data: dict,
-    phase2_results: dict = None,
-    custom_scan_instructions: Optional[str] = None,
+    phase2_results: dict = None
 ) -> str:
     """Generate phase-3 prompt for per-module business flow and risk analysis."""
 
@@ -14,14 +13,6 @@ def get_phase3_comparative_analysis_prompt(
     modules = phase2_results.get("modules", []) if isinstance(phase2_results, dict) else []
 
     modules_context = json.dumps(modules, indent=2, ensure_ascii=False)
-
-    custom_section = ""
-    if custom_scan_instructions:
-        custom_section = f"""
-
-附加扫描要求：
-{custom_scan_instructions}
-"""
 
     return f"""你是一名资深应用安全工程师，正在执行模块级安全分析的 Phase 3：模块业务逻辑与风险分析。
 
@@ -89,5 +80,4 @@ def get_phase3_comparative_analysis_prompt(
 - risk_level 使用 HIGH/MEDIUM/LOW。
 - confidence 范围 [0, 1]。
 - 当前模块未识别到有效风险时，risks 返回空数组。
-{custom_section}
 """

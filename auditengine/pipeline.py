@@ -16,17 +16,30 @@ import time
 import tempfile
 from datetime import datetime
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-os.environ["NO_PROXY"] = "127.0.0.1,7.185.124.169,7.192.168.161,localhost,*.huawei.com"
 
 # Import existing components we can reuse
 from auditengine.prompts_utils import get_security_audit_prompt
 from auditengine.findings_filter import FindingsFilter
 from auditengine.json_parser import parse_json_with_fallbacks
 from auditengine.constants import (
+    ANALYSIS_SCOPE,
+    CUSTOM_SECURITY_SCAN_INSTRUCTIONS,
+    ENABLE_HARD_EXCLUSIONS,
+    ENABLE_OPENCODE_FILTERING,
+    EXCLUDE_DIRECTORIES,
     EXIT_CONFIGURATION_ERROR,
-    EXIT_SUCCESS,
     EXIT_GENERAL_ERROR,
-    SUBPROCESS_TIMEOUT
+    FALSE_POSITIVE_FILTERING_INSTRUCTIONS,
+    GITHUB_TOKEN,
+    GIT_URL,
+    NO_PROXY,
+    OPENCODE_SERVER_BIN,
+    PR_NUMBER,
+    REPO_NAME,
+    REPO_PATH,
+    RUNTIME_USER,
+    SUBPROCESS_TIMEOUT,
+    USE_PHASED_ANALYSIS,
 )
 from auditengine.logger import get_logger
 
@@ -34,6 +47,8 @@ from auditengine.logger import get_logger
 from auditengine.session_manager import OpenCodeSessionManager, OpenCodeServerRuntime
 from auditengine.phased_analyzer import PhasedSecurityAnalyzer
 from auditengine.unified_output_manager import UnifiedOutputManager
+
+os.environ["NO_PROXY"] = NO_PROXY
 
 logger = get_logger(__name__)
 
@@ -50,7 +65,7 @@ class GitHubActionClient:
     
     def __init__(self):
         """Initialize GitHub client using environment variables."""
-        self.github_token = os.environ.get('GITHUB_TOKEN')
+        self.github_token = GITHUB_TOKEN
         if not self.github_token:
             raise ValueError("GITHUB_TOKEN environment variable required")
             
@@ -59,8 +74,7 @@ class GitHubActionClient:
         }
         
         # Get excluded directories from environment
-        exclude_dirs = os.environ.get('EXCLUDE_DIRECTORIES', '')
-        self.excluded_dirs = [d.strip() for d in exclude_dirs.split(',') if d.strip()] if exclude_dirs else []
+        self.excluded_dirs = EXCLUDE_DIRECTORIES
         if self.excluded_dirs:
             logger.debug(f"Excluded directories: {self.excluded_dirs}")
     
@@ -184,8 +198,7 @@ class RepositoryScopeClient:
     """Repository scanner and exclusion matcher for full-repo mode."""
 
     def __init__(self):
-        exclude_dirs = os.environ.get('EXCLUDE_DIRECTORIES', '')
-        self.excluded_dirs = [d.strip() for d in exclude_dirs.split(',') if d.strip()] if exclude_dirs else []
+        self.excluded_dirs = EXCLUDE_DIRECTORIES
         if self.excluded_dirs:
             logger.info(f"Excluded directories: {self.excluded_dirs}")
 
@@ -228,7 +241,7 @@ class RepositoryScopeClient:
             'number': 0,
             'title': 'Full repository security scan',
             'body': 'Scan scope: full repository',
-            'user': os.environ.get('USER', 'system'),
+            'user': RUNTIME_USER,
             'created_at': None,
             'updated_at': None,
             'state': 'full_scan',
@@ -260,7 +273,6 @@ class SimpleAuditRunner:
     def run_phased_security_audit_with_session(self, 
                                              repo_dir: Path, 
                                              pr_data: Dict[str, Any],
-                                             custom_scan_instructions: Optional[str] = None,
                                              session_manager: Optional[OpenCodeSessionManager] = None,
                                              output_manager: Optional[UnifiedOutputManager] = None) -> Tuple[bool, str, Dict[str, Any]]:
         """Run phased security audit using the new OpenCode session-based workflow with external session.
@@ -268,7 +280,6 @@ class SimpleAuditRunner:
         Args:
             repo_dir: Repository directory path
             pr_data: PR data dictionary
-            custom_scan_instructions: Optional custom security categories to append
             session_manager: External session manager to use (if None, creates new one)
             output_manager: Shared output manager for unified artifact persistence
             
@@ -308,7 +319,6 @@ class SimpleAuditRunner:
             try:
                 analysis_results = phased_analyzer.execute_phased_analysis(
                     pr_data=pr_data,
-                    custom_scan_instructions=custom_scan_instructions,
                     repo_dir=repo_dir
                 )
                 
@@ -467,7 +477,7 @@ class SimpleAuditRunner:
         """Validate that runtime command is available."""
         try:
             result = subprocess.run(
-                ['opencode', '--version'],
+                [OPENCODE_SERVER_BIN, '--version'],
                 # shell=True,
                 capture_output=True,
                 text=True,
@@ -494,8 +504,8 @@ class SimpleAuditRunner:
 
 def get_environment_config() -> Tuple[str, str, int]:
     """Get and validate PR environment configuration."""
-    git_url = os.environ.get('GIT_URL')
-    pr_number_str = os.environ.get('PR_NUMBER')
+    git_url = GIT_URL
+    pr_number_str = PR_NUMBER
 
     if not git_url:
         raise ConfigurationError('GIT_URL environment variable required in PR mode')
@@ -523,11 +533,11 @@ def get_environment_config() -> Tuple[str, str, int]:
 
 def get_scan_scope() -> str:
     """Return scan scope with backward-compatible inference."""
-    scope_env = os.environ.get('ANALYSIS_SCOPE')
+    scope_env = ANALYSIS_SCOPE
     if scope_env:
         scope = scope_env.strip().lower()
     else:
-        has_pr_env = bool(os.environ.get('GIT_URL')) and bool(os.environ.get('PR_NUMBER'))
+        has_pr_env = bool(GIT_URL) and bool(PR_NUMBER)
         scope = 'pr' if has_pr_env else 'full_repo'
 
     if scope not in {'full_repo', 'pr'}:
@@ -537,7 +547,7 @@ def get_scan_scope() -> str:
 
 def get_repo_directory() -> Path:
     """Resolve repository directory for scanning."""
-    repo_path = os.environ.get('REPO_PATH')
+    repo_path = REPO_PATH
     repo_dir = Path(repo_path) if repo_path else Path.cwd()
     if not repo_dir.exists() or not repo_dir.is_dir():
         raise ConfigurationError(f"Invalid REPO_PATH directory: {repo_dir}")
@@ -578,7 +588,7 @@ def initialize_findings_filter(custom_filtering_instructions: Optional[str] = No
     """
     try:
         # Check if we should use AI filtering
-        use_ai_filtering = os.environ.get('ENABLE_OPENCODE_FILTERING', 'true').lower() == 'true'
+        use_ai_filtering = ENABLE_OPENCODE_FILTERING
         
         if use_ai_filtering:
             # Use full filtering with external session manager if provided
@@ -616,8 +626,8 @@ def apply_findings_filter_with_shared_session(original_findings: List[Dict[str, 
         Tuple of (kept_findings, excluded_findings, analysis_summary)
     """
     # Determine filtering configuration from environment
-    use_hard_exclusions = os.environ.get('ENABLE_HARD_EXCLUSIONS', 'true').lower() == 'true'
-    use_ai_filtering = os.environ.get('ENABLE_OPENCODE_FILTERING', 'true').lower() == 'true'
+    use_hard_exclusions = ENABLE_HARD_EXCLUSIONS
+    use_ai_filtering = ENABLE_OPENCODE_FILTERING
     
     # Create filter based on availability
     try:
@@ -722,18 +732,18 @@ def main():
         workflow_started_at = datetime.now().isoformat()
         workflow_start_time = time.time()
         scan_scope = get_scan_scope()
-        use_phased_analysis = os.environ.get('USE_PHASED_ANALYSIS', 'true').lower() == 'true'
+        use_phased_analysis = USE_PHASED_ANALYSIS
         repo_dir = get_repo_directory()
 
         # Load optional instructions
         custom_filtering_instructions = None
-        filtering_file = os.environ.get('FALSE_POSITIVE_FILTERING_INSTRUCTIONS', '')
+        filtering_file = FALSE_POSITIVE_FILTERING_INSTRUCTIONS
         if filtering_file and Path(filtering_file).exists():
             with open(filtering_file, 'r', encoding='utf-8') as f:
                 custom_filtering_instructions = f.read()
 
         custom_scan_instructions = None
-        scan_file = os.environ.get('CUSTOM_SECURITY_SCAN_INSTRUCTIONS', '')
+        scan_file = CUSTOM_SECURITY_SCAN_INSTRUCTIONS
         if scan_file and Path(scan_file).exists():
             with open(scan_file, 'r', encoding='utf-8') as f:
                 custom_scan_instructions = f.read()
@@ -749,7 +759,7 @@ def main():
             host, repo_name, pr_number = get_environment_config()
             pr_data = scope_client.get_pr_data(host, repo_name, pr_number)
         else:
-            repo_name = os.environ.get('REPO_NAME', repo_dir.name)
+            repo_name = REPO_NAME or repo_dir.name
             pr_number = 0
             pr_data = scope_client.get_full_repo_data(repo_dir, repo_name)
 
@@ -775,7 +785,6 @@ def main():
             success, error_msg, results = audit_runner.run_phased_security_audit_with_session(
                 repo_dir,
                 pr_data,
-                custom_scan_instructions=custom_scan_instructions,
                 session_manager=shared_session_manager,
                 output_manager=output_manager
             )
@@ -812,7 +821,7 @@ def main():
 
         phase7_started_at = datetime.now().isoformat()
         phase7_start_time = time.time()
-        phase7_model_id, phase7_provider_id = shared_session_manager.get_effective_model_provider()
+        phase7_model_id, phase7_provider_id = shared_session_manager.model, shared_session_manager.provider_id
 
         kept_findings, excluded_findings, filter_stats = apply_findings_filter_with_shared_session(
             original_findings,
