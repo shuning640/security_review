@@ -392,7 +392,6 @@ class FindingsFilter:
     def __init__(self, 
                  use_hard_exclusions: bool = True,
                  use_claude_filtering: bool = True,
-                 api_key: Optional[str] = None,
                  model: str = DEFAULT_CLAUDE_MODEL,
                  custom_filtering_instructions: Optional[str] = None,
                  provider_id: str = DEFAULT_CLAUDE_PROVIDER,
@@ -405,7 +404,6 @@ class FindingsFilter:
         Args:
             use_hard_exclusions: Whether to apply hard exclusion rules
             use_claude_filtering: Whether to use Claude API for filtering
-            api_key: Anthropic API key for Claude filtering (deprecated, unused)
             model: Claude model to use for filtering
             custom_filtering_instructions: Optional custom filtering instructions
             provider_id: Provider ID for OpenCode
@@ -415,8 +413,6 @@ class FindingsFilter:
             external_session_manager: External session manager to reuse (if provided, 
                                      the filter will use this session instead of creating a new one)
         """
-        del api_key
-
         self.use_hard_exclusions = use_hard_exclusions
         self.use_claude_filtering = use_claude_filtering
         self.custom_filtering_instructions = custom_filtering_instructions

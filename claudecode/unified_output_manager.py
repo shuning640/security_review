@@ -13,11 +13,9 @@ class NoOpOutputManager:
     """No-op output manager used when artifact persistence is disabled."""
 
     def save_json(self, filename: str, data: Dict[str, Any], sub_dir: Optional[str] = None) -> Path:
-        del filename, data, sub_dir
         return Path("")
 
     def save_text(self, filename: str, content: str, sub_dir: Optional[str] = None) -> Path:
-        del filename, content, sub_dir
         return Path("")
 
     def get_session_dir(self) -> Path:

@@ -5,14 +5,10 @@ import json
 
 def get_phase3_comparative_analysis_prompt(
     pr_data: dict,
-    pr_diff: Optional[str] = None,
     phase2_results: dict = None,
-    include_diff: bool = True,
     custom_scan_instructions: Optional[str] = None,
 ) -> str:
     """Generate phase-3 prompt for per-module business flow and risk analysis."""
-    del pr_diff
-    del include_diff
 
     repo_name = pr_data.get("head", {}).get("repo", {}).get("full_name", "unknown")
     modules = phase2_results.get("modules", []) if isinstance(phase2_results, dict) else []

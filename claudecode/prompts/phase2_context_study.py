@@ -6,13 +6,9 @@ import json
 def get_phase2_context_study_prompt(
     pr_data: dict,
     phase1_results: Optional[dict] = None,
-    pr_diff: Optional[str] = None,
-    include_diff: bool = True,
     custom_scan_instructions: Optional[str] = None,
 ) -> str:
     """Generate phase-2 prompt for full-repository module decomposition."""
-    del pr_diff
-    del include_diff
 
     repo_name = pr_data.get("head", {}).get("repo", {}).get("full_name", "unknown")
     repo_path = pr_data.get("repository_path", "unknown")

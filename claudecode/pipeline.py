@@ -31,7 +31,7 @@ from claudecode.constants import (
 from claudecode.logger import get_logger
 
 # Import phased analysis components
-from claudecode.session_manager import OpenCodeSessionManager
+from claudecode.session_manager import OpenCodeSessionManager, OpenCodeServerRuntime
 from claudecode.phased_analyzer import PhasedSecurityAnalyzer
 from claudecode.unified_output_manager import UnifiedOutputManager
 
@@ -128,25 +128,6 @@ class GitHubActionClient:
             'deletions': pr_data.get('removed_lines', 0),
             'changed_files': len(pr_data.get('changes',[]))
         }
-    
-    def get_pr_diff(self, repo_name: str, pr_number: int) -> str:
-        """Get complete PR diff in unified format.
-        
-        Args:
-            repo_name: Repository name in format "owner/repo"
-            pr_number: Pull request number
-            
-        Returns:
-            Complete PR diff in unified format
-        """
-        url = f"https://api.github.com/repos/{repo_name}/pulls/{pr_number}"
-        headers = dict(self.headers)
-        headers['Accept'] = 'application/vnd.github.diff'
-        
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        
-        return self._filter_generated_files(response.text)
     
     def _is_excluded(self, filepath: str) -> bool:
         """Check if a file should be excluded based on directory patterns."""
@@ -279,9 +260,7 @@ class SimpleClaudeRunner:
     def run_phased_security_audit_with_session(self, 
                                              repo_dir: Path, 
                                              pr_data: Dict[str, Any],
-                                             pr_diff: Optional[str] = None,
                                              custom_scan_instructions: Optional[str] = None,
-                                             include_diff: bool = True,
                                              session_manager: Optional[OpenCodeSessionManager] = None,
                                              output_manager: Optional[UnifiedOutputManager] = None) -> Tuple[bool, str, Dict[str, Any]]:
         """Run phased security audit using the new OpenCode session-based workflow with external session.
@@ -289,9 +268,7 @@ class SimpleClaudeRunner:
         Args:
             repo_dir: Repository directory path
             pr_data: PR data dictionary
-            pr_diff: Optional complete PR diff in unified format
             custom_scan_instructions: Optional custom security categories to append
-            include_diff: Whether to include the diff in the analysis
             session_manager: External session manager to use (if None, creates new one)
             output_manager: Shared output manager for unified artifact persistence
             
@@ -303,9 +280,12 @@ class SimpleClaudeRunner:
         
         # Create session if not provided
         session_needs_close = False
+        local_server_runtime = None
         if session_manager is None:
             try:
-                session_manager = OpenCodeSessionManager(timeout_seconds=self.timeout_seconds, repo_path=str(repo_dir))
+                local_server_runtime = OpenCodeServerRuntime(repo_path=str(repo_dir))
+                local_server_runtime.start()
+                session_manager = OpenCodeSessionManager(timeout_seconds=self.timeout_seconds)
                 session_needs_close = True
                 logger.info("为分阶段分析创建临时session")
             except Exception as e:
@@ -328,9 +308,7 @@ class SimpleClaudeRunner:
             try:
                 analysis_results = phased_analyzer.execute_phased_analysis(
                     pr_data=pr_data,
-                    pr_diff=pr_diff,
                     custom_scan_instructions=custom_scan_instructions,
-                    include_diff=include_diff,
                     repo_dir=repo_dir
                 )
                 
@@ -353,6 +331,11 @@ class SimpleClaudeRunner:
                     logger.info("已关闭临时创建的session")
                 except Exception as e:
                     logger.warning(f"关闭临时session时出错: {str(e)}")
+            if local_server_runtime:
+                try:
+                    local_server_runtime.stop()
+                except Exception as e:
+                    logger.warning(f"关闭临时server时出错: {str(e)}")
     
     def run_security_audit(self, repo_dir: Path, prompt: str) -> Tuple[bool, str, Dict[str, Any]]:
         """Run Claude Code security audit.
@@ -596,14 +579,12 @@ def initialize_findings_filter(custom_filtering_instructions: Optional[str] = No
     try:
         # Check if we should use Claude API filtering
         use_claude_filtering = os.environ.get('ENABLE_OPENCODE_FILTERING', 'true').lower() == 'true'
-        api_key = os.environ.get('ANTHROPIC_API_KEY')
         
-        if use_claude_filtering and api_key:
+        if use_claude_filtering:
             # Use full filtering with external session manager if provided
             return FindingsFilter(
                 use_hard_exclusions=True,
                 use_claude_filtering=True,
-                api_key=api_key,
                 custom_filtering_instructions=custom_filtering_instructions,
                 external_session_manager=external_session_manager
             )
@@ -736,7 +717,10 @@ def _is_finding_in_excluded_directory(finding: Dict[str, Any], github_client: An
 def main():
     """Main execution function for phased security analysis."""
     shared_session_manager = None
+    shared_server_runtime = None
     try:
+        workflow_started_at = datetime.now().isoformat()
+        workflow_start_time = time.time()
         scan_scope = get_scan_scope()
         use_phased_analysis = os.environ.get('USE_PHASED_ANALYSIS', 'true').lower() == 'true'
         repo_dir = get_repo_directory()
@@ -770,9 +754,13 @@ def main():
             pr_data = scope_client.get_full_repo_data(repo_dir, repo_name)
 
         try:
+            shared_server_runtime = OpenCodeServerRuntime(
+                repo_path=str(repo_dir)
+            )
+            shared_server_runtime.start()
+
             shared_session_manager = OpenCodeSessionManager(
                 timeout_seconds=claude_runner.timeout_seconds,
-                repo_path=str(repo_dir)
             )
             shared_session_manager.create_session()
             output_manager = UnifiedOutputManager(
@@ -787,9 +775,7 @@ def main():
             success, error_msg, results = claude_runner.run_phased_security_audit_with_session(
                 repo_dir,
                 pr_data,
-                pr_diff=None,
                 custom_scan_instructions=custom_scan_instructions,
-                include_diff=(scan_scope == 'pr'),
                 session_manager=shared_session_manager,
                 output_manager=output_manager
             )
@@ -847,7 +833,8 @@ def main():
             'filtering_summary': filter_stats,
         }
         output_manager.save_json('phase7_result.json', final_defects)
-        output_manager.save_json('phase7_metadata.json', {
+
+        phase7_metadata = {
             'phase': 'phase7',
             'name': 'findings_filtering',
             'status': 'success',
@@ -858,10 +845,26 @@ def main():
             'response_file': None,
             'result_file': 'phase7_result.json',
             'error_message': None,
-        })
+        }
 
         if use_phased_analysis and isinstance(results, dict):
             results.setdefault('phased_results', {})['phase7'] = final_defects
+            results.setdefault('phase_metadata', {})['phase7'] = phase7_metadata
+
+        consolidated_phase_metadata = {}
+        if isinstance(results, dict):
+            consolidated_phase_metadata = dict(results.get('phase_metadata', {}))
+        if 'phase7' not in consolidated_phase_metadata:
+            consolidated_phase_metadata['phase7'] = phase7_metadata
+
+        output_manager.save_json('analysis_metadata.json', {
+            'workflow': 'phased' if use_phased_analysis else 'legacy',
+            'started_at': workflow_started_at,
+            'ended_at': datetime.now().isoformat(),
+            'duration_seconds': time.time() - workflow_start_time,
+            'scan_scope': analysis_summary.get('scan_scope'),
+            'phase_metadata': consolidated_phase_metadata,
+        })
 
         output = {
             'scan_scope': analysis_summary['scan_scope'],
@@ -894,6 +897,11 @@ def main():
                 shared_session_manager.close_session()
             except Exception as cleanup_error:
                 logger.warning(f"Error closing shared session: {cleanup_error}")
+        if shared_server_runtime:
+            try:
+                shared_server_runtime.stop()
+            except Exception as cleanup_error:
+                logger.warning(f"Error stopping global server runtime: {cleanup_error}")
 
 
 if __name__ == '__main__':

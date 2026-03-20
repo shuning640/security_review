@@ -1,4 +1,4 @@
-"""OpenCode session manager for phased analysis workflows."""
+"""OpenCode server/session lifecycle helpers for phased analysis workflows."""
 
 import os
 import sys
@@ -21,7 +21,7 @@ logger = get_logger(__name__)
 
 
 class OpenCodeSessionManager:
-    """Manage one OpenCode server + one session lifecycle."""
+    """Manage one OpenCode session lifecycle."""
 
     def __init__(
         self,
@@ -29,10 +29,8 @@ class OpenCodeSessionManager:
         timeout_seconds: Optional[int] = None,
         model: str = DEFAULT_CLAUDE_MODEL,
         provider_id: str = DEFAULT_CLAUDE_PROVIDER,
-        repo_path: Optional[str] = None,
         port: Optional[int] = None,
     ):
-        self.repo_path = repo_path
         self.timeout_seconds = timeout_seconds or DEFAULT_TIMEOUT_SECONDS
         self.model = model
         self.provider_id = provider_id
@@ -41,13 +39,7 @@ class OpenCodeSessionManager:
         self.client = Opencode(base_url=self.host, timeout=self.timeout_seconds)
 
         self.session_id: Optional[str] = None
-        self._server_process: Optional[subprocess.Popen] = None
-        self._server_pgid: Optional[int] = None
-        self._owns_server = False
-
-        # Start local server only when scanning local repo with localhost target.
-        if self.repo_path and self._is_local_host(self.host):
-            self._start_server()
+        self._closed = False
 
     def _resolve_host_and_port(self, host: Optional[str], port: Optional[int]) -> Tuple[str, int]:
         env_port = os.environ.get("OPENCODE_PORT")
@@ -84,102 +76,16 @@ class OpenCodeSessionManager:
         except OSError:
             return False
 
-    def _wait_server_ready(self, timeout_seconds: float = 10.0) -> bool:
+    @staticmethod
+    def _wait_server_ready(port: int, process: Optional[subprocess.Popen], timeout_seconds: float = 10.0) -> bool:
         deadline = time.time() + timeout_seconds
         while time.time() < deadline:
-            if self._is_port_listening(self.port):
+            if OpenCodeSessionManager._is_port_listening(port):
                 return True
-            if self._server_process is not None and self._server_process.poll() is not None:
+            if process is not None and process.poll() is not None:
                 return False
             time.sleep(0.2)
-        return self._is_port_listening(self.port)
-
-    def _start_server(self) -> None:
-        repo_abs_path = str(Path(self.repo_path).resolve())
-        if not os.path.exists(repo_abs_path):
-            raise ValueError(f"Repository path does not exist: {repo_abs_path}")
-
-        if self._is_port_listening(self.port):
-            logger.info(f"Reusing existing OpenCode server on port {self.port}")
-            self._owns_server = False
-            return
-
-        server_bin_candidates = ["opencode", "opencode.cwd"]
-        server_bin = os.environ.get("OPENCODE_SERVER_BIN")
-        if server_bin:
-            server_bin_candidates = [server_bin]
-
-        cmd = None
-        for candidate in server_bin_candidates:
-            cmd_candidate = [candidate, "serve", "--port", str(self.port)]
-            if self._is_windows():
-                cmd = " ".join(cmd_candidate)
-            else:
-                cmd = cmd_candidate
-            logger.info(f"Starting OpenCode server: {' '.join(cmd_candidate)}")
-            try:
-                self._server_process = subprocess.Popen(
-                    cmd,
-                    cwd=repo_abs_path,
-                    text=True,
-                    start_new_session=True,
-                    shell=self._is_windows(),
-                )
-                break
-            except FileNotFoundError:
-                self._server_process = None
-                continue
-
-        if self._server_process is None:
-            raise RuntimeError("Failed to start OpenCode server: command not found (tried opencode, opencode.cwd)")
-
-        if hasattr(os, "getpgid") and not self._is_windows():
-            self._server_pgid = os.getpgid(self._server_process.pid)
-        else:
-            self._server_pgid = None
-        self._owns_server = True
-
-        if not self._wait_server_ready():
-            return_code = self._server_process.poll() if self._server_process else None
-            self._stop_server()
-            raise RuntimeError(
-                f"Failed to start OpenCode server on port {self.port}"
-                + (f" (exit code: {return_code})" if return_code is not None else "")
-            )
-
-        logger.info(f"OpenCode server ready on {self.host}")
-
-    def _stop_server(self) -> None:
-        if not self._owns_server:
-            return
-        if self._server_process is None:
-            return
-        if self._server_process.poll() is not None:
-            return
-
-        logger.info("Stopping background OpenCode server...")
-        if self._server_pgid is not None and hasattr(os, "killpg"):
-            os.killpg(self._server_pgid, signal.SIGTERM)
-        else:
-            self._server_process.terminate()
-        try:
-            self._server_process.wait(timeout=5)
-        except Exception:
-            if self._server_pgid is not None and hasattr(os, "killpg"):
-                os.killpg(self._server_pgid, signal.SIGKILL)
-            else:
-                self._server_process.kill()
-            self._server_process.wait(timeout=5)
-        finally:
-            self._server_process = None
-            self._server_pgid = None
-            self._owns_server = False
-
-        # Some opencode versions may leave a detached listener; cleanup by port.
-        if self._is_port_listening(self.port):
-            self._kill_port_listener(self.port)
-
-        logger.info("OpenCode server stopped.")
+        return OpenCodeSessionManager._is_port_listening(port)
 
     @staticmethod
     def _kill_port_listener(port: int) -> None:
@@ -280,8 +186,7 @@ class OpenCodeSessionManager:
                 result = False
             finally:
                 self.session_id = None
-
-        self._stop_server()
+        self._closed = True
         return result
 
     def get_session_info(self) -> Dict[str, Any]:
@@ -289,7 +194,11 @@ class OpenCodeSessionManager:
             return {"status": "no_active_session"}
         try:
             response = self.client.session.messages(id=self.session_id)
-            return response
+            if hasattr(response, "to_dict"):
+                return response.to_dict()
+            if isinstance(response, dict):
+                return response
+            return {"raw": response}
         except Exception as exc:
             logger.error(f"Failed to get session info: {exc}")
             return {"error": str(exc)}
@@ -303,14 +212,128 @@ class OpenCodeSessionManager:
 
     def __del__(self):
         try:
-            self.close_session()
+            if not self._closed:
+                self.close_session()
         except Exception:
             pass
 
 
+class OpenCodeServerRuntime:
+    """Manage one global OpenCode serve process for the full workflow."""
+
+    def __init__(self, repo_path: str, host: Optional[str] = None, port: Optional[int] = None):
+        self.repo_path = repo_path
+        env_port = os.environ.get("OPENCODE_PORT")
+        default_port = int(env_port) if env_port and env_port.isdigit() else 4096
+        chosen_port = int(port) if port is not None else default_port
+
+        raw_host = (host or os.environ.get("OPENCODE_API_URL") or f"http://127.0.0.1:{chosen_port}").rstrip("/")
+        parsed = urlparse(raw_host)
+        if not parsed.scheme:
+            raw_host = f"http://{raw_host}"
+            parsed = urlparse(raw_host)
+
+        hostname = parsed.hostname or "127.0.0.1"
+        final_port = int(port) if port is not None else (parsed.port or chosen_port)
+        self.host = f"{parsed.scheme}://{hostname}:{final_port}"
+        self.port = final_port
+        self._server_process: Optional[subprocess.Popen] = None
+        self._server_pgid: Optional[int] = None
+        self._owns_server = False
+
+    def start(self) -> None:
+        repo_abs_path = str(Path(self.repo_path).resolve())
+        if not os.path.exists(repo_abs_path):
+            raise ValueError(f"Repository path does not exist: {repo_abs_path}")
+
+        if not OpenCodeSessionManager._is_local_host(self.host):
+            logger.info(f"Using remote OpenCode host, skip local server startup: {self.host}")
+            self._owns_server = False
+            return
+
+        if OpenCodeSessionManager._is_port_listening(self.port):
+            logger.info(f"Reusing existing OpenCode server on port {self.port}")
+            self._owns_server = False
+            return
+
+        server_bin_candidates = ["opencode", "opencode.cwd"]
+        server_bin = os.environ.get("OPENCODE_SERVER_BIN")
+        if server_bin:
+            server_bin_candidates = [server_bin]
+
+        process = None
+        for candidate in server_bin_candidates:
+            cmd_candidate = [candidate, "serve", "--port", str(self.port)]
+            cmd = " ".join(cmd_candidate) if OpenCodeSessionManager._is_windows() else cmd_candidate
+            logger.info(f"Starting OpenCode server: {' '.join(cmd_candidate)}")
+            try:
+                process = subprocess.Popen(
+                    cmd,
+                    cwd=repo_abs_path,
+                    text=True,
+                    start_new_session=True,
+                    shell=OpenCodeSessionManager._is_windows(),
+                )
+                break
+            except FileNotFoundError:
+                process = None
+                continue
+
+        if process is None:
+            raise RuntimeError("Failed to start OpenCode server: command not found (tried opencode, opencode.cwd)")
+
+        self._server_process = process
+        if hasattr(os, "getpgid") and not OpenCodeSessionManager._is_windows():
+            self._server_pgid = os.getpgid(self._server_process.pid)
+        else:
+            self._server_pgid = None
+        self._owns_server = True
+
+        if not OpenCodeSessionManager._wait_server_ready(self.port, self._server_process):
+            return_code = self._server_process.poll() if self._server_process else None
+            self.stop()
+            raise RuntimeError(
+                f"Failed to start OpenCode server on port {self.port}"
+                + (f" (exit code: {return_code})" if return_code is not None else "")
+            )
+
+        logger.info(f"OpenCode server ready on {self.host}")
+
+    def stop(self) -> None:
+        if not self._owns_server:
+            return
+        if self._server_process is None:
+            return
+        if self._server_process.poll() is not None:
+            return
+
+        logger.info("Stopping global OpenCode server...")
+        if self._server_pgid is not None and hasattr(os, "killpg"):
+            os.killpg(self._server_pgid, signal.SIGTERM)
+        else:
+            self._server_process.terminate()
+
+        try:
+            self._server_process.wait(timeout=5)
+        except Exception:
+            if self._server_pgid is not None and hasattr(os, "killpg"):
+                os.killpg(self._server_pgid, signal.SIGKILL)
+            else:
+                self._server_process.kill()
+            self._server_process.wait(timeout=5)
+        finally:
+            self._server_process = None
+            self._server_pgid = None
+            self._owns_server = False
+
+        if OpenCodeSessionManager._is_port_listening(self.port):
+            OpenCodeSessionManager._kill_port_listener(self.port)
+
+        logger.info("OpenCode server stopped.")
+
+
 def get_session_manager(
     host: Optional[str] = None,
-    repo_path: Optional[str] = None,
     timeout_seconds: Optional[int] = None,
     port: Optional[int] = None,
 ) -> OpenCodeSessionManager:
@@ -318,7 +341,6 @@ def get_session_manager(
     return OpenCodeSessionManager(
         host=host,
         timeout_seconds=timeout_seconds,
-        repo_path=repo_path,
         port=port,
     )
 
@@ -327,11 +349,14 @@ if __name__ == "__main__":
     try:
         repo_path = os.environ.get("REPO_PATH")
         repo_dir = Path(repo_path) if repo_path else Path.cwd()
-        with get_session_manager(repo_path=str(repo_dir)) as manager:
+        runtime = OpenCodeServerRuntime(repo_path=str(repo_dir))
+        runtime.start()
+        with get_session_manager() as manager:
             info = manager.get_session_info()
             logger.info(f"Session info: {info}")
 
             test_response = manager.send_message("@explore 搜索一下关于 auth 的所有文件和逻辑")
             logger.info(f"Test response: {test_response}")
+        runtime.stop()
     except Exception as exc:
         logger.error(f"Test failed: {exc}")

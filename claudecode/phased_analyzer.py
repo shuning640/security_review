@@ -162,10 +162,10 @@ class PhasedSecurityAnalyzer:
                 phase2_results=module_context,
                 custom_scan_instructions=self.custom_scan_instructions,
             )
-            self.output_manager.save_text(f"phase3_module_{index}_prompt.txt", prompt3)
+            self.output_manager.save_text(f"module_{index}_phase3_prompt.txt", prompt3)
             response3 = sub_session.send_message(prompt=prompt3)
-            # self.output_manager.save_json(f"phase3_module_{index}_response.json", response3)
-            ok3, parsed3 = self._parse_phase_response(response3, f"phase3_module_{index}")
+            # self.output_manager.save_json(f"module_{index}_phase3_response.json", response3)
+            ok3, parsed3 = self._parse_phase_response(response3, f"module_{index}_phase3")
             if not ok3:
                 raise PhaseParseError(f"phase3 parse failed for module '{module_name}'")
 
@@ -178,7 +178,7 @@ class PhasedSecurityAnalyzer:
                     "attack_surfaces": [],
                     "risks": [],
                 }
-            self.output_manager.save_json(f"phase3_module_{index}_result.json", phase3_selected)
+            self.output_manager.save_json(f"module_{index}_phase3_result.json", phase3_selected)
 
             prompt4 = get_phase4_cwd_routing_prompt(
                 pr_data=pr_data,
@@ -187,10 +187,10 @@ class PhasedSecurityAnalyzer:
                 cwd_catalog=cwd_catalog,
                 custom_scan_instructions=self.custom_scan_instructions,
             )
-            self.output_manager.save_text(f"phase4_module_{index}_prompt.txt", prompt4)
+            self.output_manager.save_text(f"module_{index}_phase4_prompt.txt", prompt4)
             response4 = sub_session.send_message(prompt=prompt4)
-            # self.output_manager.save_json(f"phase4_module_{index}_response.json", response4)
-            ok4, parsed4 = self._parse_phase_response(response4, f"phase4_module_{index}")
+            # self.output_manager.save_json(f"module_{index}_phase4_response.json", response4)
+            ok4, parsed4 = self._parse_phase_response(response4, f"module_{index}_phase4")
             if not ok4:
                 raise PhaseParseError(f"phase4 parse failed for module '{module_name}'")
 
@@ -200,7 +200,7 @@ class PhasedSecurityAnalyzer:
                     "module_name": module_name,
                     "cwd_rankings": [],
                 }
-            self.output_manager.save_json(f"phase4_module_{index}_result.json", phase4_selected)
+            self.output_manager.save_json(f"pmodule_{index}_hase4_result.json", phase4_selected)
 
             prompt5 = get_phase5_vulnerability_assessment_prompt(
                 pr_data=pr_data,
@@ -209,16 +209,16 @@ class PhasedSecurityAnalyzer:
                 phase4_results={"module_cwd_priorities": [phase4_selected]},
                 custom_scan_instructions=self.custom_scan_instructions,
             )
-            self.output_manager.save_text(f"phase5_module_{index}_prompt.txt", prompt5)
+            self.output_manager.save_text(f"module_{index}_phase5_prompt.txt", prompt5)
             response5 = sub_session.send_message(prompt=prompt5)
-            # self.output_manager.save_json(f"phase5_module_{index}_response.json", response5)
-            ok5, parsed5 = self._parse_phase_response(response5, f"phase5_module_{index}")
+            # self.output_manager.save_json(f"module_{index}_phase5_response.json", response5)
+            ok5, parsed5 = self._parse_phase_response(response5, f"module_{index}_phase5")
             if not ok5:
                 raise PhaseParseError(f"phase5 parse failed for module '{module_name}'")
 
             session_history = sub_session.get_session_info()
             serializable_history = [x.model_dump(mode="json", warnings=False) for x in session_history]
-            # self.output_manager.save_json(f"phase5_module_{index}_session_messages.json", serializable_history)
+            # self.output_manager.save_json(f"module_{index}_phase5_session_messages.json", serializable_history)
 
             expected_skills = [
                 item.get("skill_name", "")
@@ -226,7 +226,7 @@ class PhasedSecurityAnalyzer:
                 if isinstance(item, dict)
             ]
             skill_audit = self._audit_skill_usage(serializable_history, expected_skills)
-            # self.output_manager.save_json(f"phase5_module_{index}_skill_audit.json", skill_audit)
+            # self.output_manager.save_json(f"module_{index}_phase5_skill_audit.json", skill_audit)
 
             phase5_selected = self._pick_module_entry(parsed5.get("module_defects", []), module_name)
             if not phase5_selected:
@@ -258,7 +258,7 @@ class PhasedSecurityAnalyzer:
                 "errored_skills": skill_audit.get("errored_skills", []),
                 "status_counts": skill_audit.get("status_counts", {}),
             }
-            self.output_manager.save_json(f"phase5_module_{index}_result.json", phase5_selected)
+            self.output_manager.save_json(f"module_{index}_phase5_result.json", phase5_selected)
 
             return index, phase3_selected, phase4_selected, phase5_selected
         finally:
@@ -267,16 +267,10 @@ class PhasedSecurityAnalyzer:
     def execute_phased_analysis(
         self,
         pr_data: Dict[str, Any],
-        pr_diff: Optional[str] = None,
         custom_scan_instructions: Optional[str] = None,
-        include_diff: bool = True,
         repo_dir: Optional[Path] = None,
-        resume_from: int = 0,
     ) -> Dict[str, Any]:
         """Execute phases 1-6 and return aggregate data for phase-7 filtering."""
-        del include_diff
-        del pr_diff
-        del resume_from
 
         self.repo_dir = repo_dir
         self.custom_scan_instructions = custom_scan_instructions
@@ -360,7 +354,7 @@ class PhasedSecurityAnalyzer:
             ended_at=datetime.now().isoformat(),
             duration_seconds=time.time() - start_time,
             prompt_file="phase1_architecture_prompt.txt",
-            details={"document_file": "phase1_architecture_document.md", "document_format": "markdown"},
+            result_file="phase1_architecture_document.md"
         )
         return result
 
@@ -396,7 +390,6 @@ class PhasedSecurityAnalyzer:
                 ended_at=datetime.now().isoformat(),
                 duration_seconds=time.time() - start_time,
                 prompt_file="phase2_prompt.txt",
-                response_file="phase2_response.json",
                 result_file=None,
                 error_message="Failed to parse phase response JSON",
             )
@@ -411,7 +404,6 @@ class PhasedSecurityAnalyzer:
             ended_at=datetime.now().isoformat(),
             duration_seconds=time.time() - start_time,
             prompt_file="phase2_prompt.txt",
-            response_file="phase2_response.json",
             result_file="phase2_result.json",
         )
         return result
@@ -677,8 +669,8 @@ class PhasedSecurityAnalyzer:
         ended_at: str,
         duration_seconds: float,
         prompt_file: Optional[str],
-        response_file: Optional[str],
-        result_file: Optional[str],
+        response_file: Optional[str] = None,
+        result_file: Optional[str] = None,
         error_message: Optional[str] = None,
         details: Optional[Dict[str, Any]] = None,
     ) -> None:
@@ -697,7 +689,6 @@ class PhasedSecurityAnalyzer:
         if details is not None:
             metadata["details"] = details
         self.phase_metadata[phase] = metadata
-        self.output_manager.save_json(f"{phase}_metadata.json", metadata)
 
     def _parse_phase_response(self, response: Dict[str, Any], phase_name: str) -> Tuple[bool, Dict[str, Any]]:
         try:

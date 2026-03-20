@@ -5,13 +5,9 @@ from typing import Optional
 
 def get_phase1_architecture_brief_prompt(
     pr_data: dict,
-    pr_diff: Optional[str] = None,
-    include_diff: bool = True,
     custom_scan_instructions: Optional[str] = None,
 ) -> str:
     """Generate phase-1 prompt for repository architecture brief."""
-    del pr_diff
-    del include_diff
 
     repo_name = pr_data.get("head", {}).get("repo", {}).get("full_name", "unknown")
     repo_path = pr_data.get("repository_path", "unknown")
@@ -35,7 +31,6 @@ def get_phase1_architecture_brief_prompt(
 
 目标：
 仅生成可用于后续模块划分的“软件与架构设计文档”。
-本阶段不做漏洞检测，不做模块划分，不输出模块列表。
 
 任务要求：
 1) 识别技术栈与工程结构：语言、框架、构建系统、运行方式、核心依赖。
