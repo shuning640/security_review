@@ -282,7 +282,8 @@ class SimpleClaudeRunner:
                                              pr_diff: Optional[str] = None,
                                              custom_scan_instructions: Optional[str] = None,
                                              include_diff: bool = True,
-                                             session_manager: Optional[OpenCodeSessionManager] = None) -> Tuple[bool, str, Dict[str, Any]]:
+                                             session_manager: Optional[OpenCodeSessionManager] = None,
+                                             output_manager: Optional[UnifiedOutputManager] = None) -> Tuple[bool, str, Dict[str, Any]]:
         """Run phased security audit using the new OpenCode session-based workflow with external session.
         
         Args:
@@ -292,6 +293,7 @@ class SimpleClaudeRunner:
             custom_scan_instructions: Optional custom security categories to append
             include_diff: Whether to include the diff in the analysis
             session_manager: External session manager to use (if None, creates new one)
+            output_manager: Shared output manager for unified artifact persistence
             
         Returns:
             Tuple of (success, error_message, results)
@@ -320,7 +322,7 @@ class SimpleClaudeRunner:
                 logger.info("创建了session_id")
             
             # Initialize phased analyzer
-            phased_analyzer = PhasedSecurityAnalyzer(session_manager, output_dir=str(repo_dir))
+            phased_analyzer = PhasedSecurityAnalyzer(session_manager, output_manager=output_manager)
             
             # Execute phased analysis
             try:
@@ -615,82 +617,10 @@ def initialize_findings_filter(custom_filtering_instructions: Optional[str] = No
     except Exception as e:
         raise ConfigurationError(f'Failed to initialize findings filter: {str(e)}')
 
-
-
-def run_security_audit(claude_runner: SimpleClaudeRunner, prompt: str) -> Dict[str, Any]:
-    """Run the security audit with Claude Code.
-    
-    Args:
-        claude_runner: Claude runner instance
-        prompt: The security audit prompt
-        
-    Returns:
-        Audit results dictionary
-        
-    Raises:
-        AuditError: If the audit fails
-    """
-    # Get repo directory from environment or use current directory
-    repo_path = os.environ.get('REPO_PATH')
-    repo_dir = Path(repo_path) if repo_path else Path.cwd()
-    success, error_msg, results = claude_runner.run_security_audit(repo_dir, prompt)
-    
-    if not success:
-        raise AuditError(f'Security audit failed: {error_msg}')
-        
-    return results
-
-
-def apply_findings_filter(findings_filter, original_findings: List[Dict[str, Any]], 
-                          pr_context: Dict[str, Any], github_client: GitHubActionClient) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
-    """Apply findings filter to reduce false positives.
-    
-    Args:
-        findings_filter: Filter instance
-        original_findings: Original findings from audit
-        pr_context: PR context information
-        github_client: GitHub client with exclusion logic
-        
-    Returns:
-        Tuple of (kept_findings, excluded_findings, analysis_summary)
-    """
-    # Apply FindingsFilter
-    filter_success, filter_results, filter_stats = findings_filter.filter_findings(
-        original_findings, pr_context
-    )
-    
-    if filter_success:
-        kept_findings = filter_results.get('filtered_findings', [])
-        excluded_findings = filter_results.get('excluded_findings', [])
-        analysis_summary = filter_results.get('analysis_summary', {})
-    else:
-        # Filtering failed, keep all findings
-        kept_findings = original_findings
-        excluded_findings = []
-        analysis_summary = {}
-    
-    # Apply final directory exclusion filtering
-    final_kept_findings = []
-    directory_excluded_findings = []
-    
-    for finding in kept_findings:
-        if _is_finding_in_excluded_directory(finding, github_client):
-            directory_excluded_findings.append(finding)
-        else:
-            final_kept_findings.append(finding)
-    
-    # Update excluded findings list
-    all_excluded_findings = excluded_findings + directory_excluded_findings
-    
-    # Update analysis summary with directory filtering stats
-    analysis_summary['directory_excluded_count'] = len(directory_excluded_findings)
-    
-    return final_kept_findings, all_excluded_findings, analysis_summary
-
 def apply_findings_filter_with_shared_session(original_findings: List[Dict[str, Any]], 
                                              pr_context: Dict[str, Any], github_client: Any,
                                              shared_session: Optional[OpenCodeSessionManager] = None,
-                                             output_dir: str = None,
+                                             output_manager: Optional[UnifiedOutputManager] = None,
                                              custom_filtering_instructions: Optional[str] = None) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
     """Apply findings filter using shared session manager.
     
@@ -699,6 +629,7 @@ def apply_findings_filter_with_shared_session(original_findings: List[Dict[str, 
         pr_context: PR context information
         github_client: GitHub client with exclusion logic
         shared_session: Optional shared session manager to use
+        output_manager: Shared output manager for unified artifact persistence
         
     Returns:
         Tuple of (kept_findings, excluded_findings, analysis_summary)
@@ -716,7 +647,7 @@ def apply_findings_filter_with_shared_session(original_findings: List[Dict[str, 
                 use_hard_exclusions=use_hard_exclusions,
                 use_claude_filtering=use_claude_filtering,
                 external_session_manager=shared_session,
-                output_dir=str(output_dir),
+                output_manager=output_manager,
                 custom_filtering_instructions=custom_filtering_instructions
             )
         else:
@@ -728,7 +659,7 @@ def apply_findings_filter_with_shared_session(original_findings: List[Dict[str, 
             active_filter = FindingsFilter(
                 use_hard_exclusions=use_hard_exclusions,
                 use_claude_filtering=use_claude_filtering,
-                output_dir=str(output_dir),
+                output_manager=output_manager,
                 custom_filtering_instructions=custom_filtering_instructions
             )
             
@@ -844,6 +775,10 @@ def main():
                 repo_path=str(repo_dir)
             )
             shared_session_manager.create_session()
+            output_manager = UnifiedOutputManager(
+                session_id=shared_session_manager.session_id,
+                base_output_dir=str(repo_dir)
+            )
         except Exception as e:
             print(json.dumps({'error': f'Session manager initialization failed: {str(e)}'}))
             sys.exit(EXIT_GENERAL_ERROR)
@@ -855,7 +790,8 @@ def main():
                 pr_diff=None,
                 custom_scan_instructions=custom_scan_instructions,
                 include_diff=(scan_scope == 'pr'),
-                session_manager=shared_session_manager
+                session_manager=shared_session_manager,
+                output_manager=output_manager
             )
         else:
             prompt = get_security_audit_prompt(
@@ -896,13 +832,8 @@ def main():
             pr_context,
             scope_client,
             shared_session_manager,
-            output_dir=str(repo_dir),
+            output_manager=output_manager,
             custom_filtering_instructions=custom_filtering_instructions
-        )
-
-        output_manager = UnifiedOutputManager(
-            session_id=shared_session_manager.session_id,
-            base_output_dir=str(repo_dir)
         )
 
         final_defects = {

@@ -62,7 +62,7 @@ CWD 分类目录：
       "cwd_rankings": [
         {{
           "cwd_id": "CWD-1031",
-          "skill_name": "",
+          "skill_name": "空指针解引用",
           "priority_score": 0.92,
           "rationale": "鉴权边界复杂且高风险入口集中",
           "evidence_paths": ["src/auth", "src/user"]

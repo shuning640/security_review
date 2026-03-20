@@ -5,12 +5,11 @@ from typing import Dict, Any, List, Tuple, Optional, Pattern
 import time
 from dataclasses import dataclass, field
 import json
-from pathlib import Path
 import os
 from datetime import datetime
 import sys
 
-from claudecode.unified_output_manager import UnifiedOutputManager
+from claudecode.unified_output_manager import UnifiedOutputManager, NoOpOutputManager
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # from claudecode.claude_api_client import ClaudeAPIClient
@@ -169,20 +168,16 @@ class FindingAnalyzer:
     
     def __init__(self, 
                  session_manager: OpenCodeSessionManager,
-                 output_dir: Optional[Path] = None):
+                 output_manager: Optional[UnifiedOutputManager] = None):
         """初始化分析器
         
         Args:
             session_manager: OpenCode会话管理器
-            output_dir: 中间产物输出目录
+            output_manager: 统一输出管理器（未提供则不保存中间产物）
         """
         self.session_manager = session_manager
-        
-        # 使用统一的输出管理器
-        self.output_manager = UnifiedOutputManager(
-            session_id=session_manager.session_id,
-            base_output_dir=output_dir
-        )
+
+        self.output_manager = output_manager if output_manager is not None else NoOpOutputManager()
         self.filtering_session_dir = self.output_manager.get_session_dir()
         
         logger.info(f"分析器初始化成功，会话目录：{self.filtering_session_dir}")
@@ -403,7 +398,7 @@ class FindingsFilter:
                  provider_id: str = DEFAULT_CLAUDE_PROVIDER,
                  host: Optional[str] = None,
                  timeout_seconds: Optional[int] = None,
-                 output_dir: Optional[Path] = None,
+                 output_manager: Optional[UnifiedOutputManager] = None,
                  external_session_manager: Optional[OpenCodeSessionManager] = None):
         """Initialize findings filter.
         
@@ -416,7 +411,7 @@ class FindingsFilter:
             provider_id: Provider ID for OpenCode
             host: OpenCode server address
             timeout_seconds: Timeout for API calls
-            output_dir: Output directory for intermediate artifacts
+            output_manager: Unified output manager (if None, artifacts are not saved)
             external_session_manager: External session manager to reuse (if provided, 
                                      the filter will use this session instead of creating a new one)
         """
@@ -457,7 +452,7 @@ class FindingsFilter:
                 # Initialize finding analyzer
                 self.finding_analyzer = FindingAnalyzer(
                     session_manager=self.session_manager,
-                    output_dir=output_dir
+                    output_manager=output_manager
                 )
                 
                 logger.info("OpenCode Session Manager初始化成功")

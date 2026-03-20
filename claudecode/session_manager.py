@@ -164,7 +164,7 @@ class OpenCodeSessionManager:
             self._server_process.terminate()
         try:
             self._server_process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
+        except Exception:
             if self._server_pgid is not None and hasattr(os, "killpg"):
                 os.killpg(self._server_pgid, signal.SIGKILL)
             else:

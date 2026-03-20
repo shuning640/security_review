@@ -1,9 +1,11 @@
 """Phase 2 prompt: repository module decomposition."""
 
 from typing import Optional
+import json
 
 def get_phase2_context_study_prompt(
     pr_data: dict,
+    phase1_results: Optional[dict] = None,
     pr_diff: Optional[str] = None,
     include_diff: bool = True,
     custom_scan_instructions: Optional[str] = None,
@@ -15,6 +17,11 @@ def get_phase2_context_study_prompt(
     repo_name = pr_data.get("head", {}).get("repo", {}).get("full_name", "unknown")
     repo_path = pr_data.get("repository_path", "unknown")
     total_files = pr_data.get("changed_files", 0)
+    architecture_markdown = ""
+    if isinstance(phase1_results, dict):
+        architecture_markdown = str(phase1_results.get("architecture_document_markdown", ""))
+    if not architecture_markdown:
+        architecture_markdown = json.dumps(phase1_results or {}, indent=2, ensure_ascii=False)
 
     custom_section = ""
     if custom_scan_instructions:
@@ -34,10 +41,14 @@ def get_phase2_context_study_prompt(
 - scan_scope: full_repository
 - candidate_files: {total_files}
 
+Phase 1 软件设计文档：
+{architecture_markdown}
+
 任务要求（先事实后判断，必须两步完成）：
 
 Step A - 事实层（先做证据收集，不做深推理）：
 1) 先分析仓库目录结构、技术栈与业务特征，忽略与代码逻辑不相关的内容，识别核心业务域。
+1.1) 必须优先参考 Phase 1 的组件边界、入口点、数据流和信任边界，作为模块候选的证据来源。
 2) 输出模块候选（module_candidates），每个候选必须包含：
    - candidate_id（唯一标识，例如 CAND-1）
    - module_name（候选名）
@@ -60,6 +71,7 @@ Step B - 判断层（基于 Step A 结果做模块归并与职责判断）：
 - modules[*].paths 必须来自对应 candidate_refs 的 evidence_paths，或是其直接子路径。
 - 不允许在 modules 中新增完全无证据来源的路径。
 - 若某模块证据不足，可保守合并到上层模块，但必须在 notes 说明。
+- 候选与最终模块应与 Phase 1 的组件设计保持一致；若不一致，必须在 notes 说明原因。
 
 模块拆分准则：
 - 优先业务内聚：同一业务流程中的核心目录应尽量落在同一模块。

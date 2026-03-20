@@ -11,14 +11,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from claudecode.json_parser import parse_json_with_fallbacks
 from claudecode.logger import get_logger
 from claudecode.prompts import (
-    get_phase1_skill_bootstrap_prompt,
+    get_phase1_architecture_brief_prompt,
     get_phase2_context_study_prompt,
     get_phase3_comparative_analysis_prompt,
     get_phase4_cwd_routing_prompt,
     get_phase5_vulnerability_assessment_prompt,
 )
 from claudecode.session_manager import OpenCodeSessionManager
-from claudecode.unified_output_manager import UnifiedOutputManager
+from claudecode.unified_output_manager import UnifiedOutputManager, NoOpOutputManager
 
 logger = get_logger(__name__)
 
@@ -30,15 +30,16 @@ class PhaseParseError(RuntimeError):
 class PhasedSecurityAnalyzer:
     """Full-repository phased analyzer with intermediate JSON artifacts."""
 
-    def __init__(self, session_manager: OpenCodeSessionManager, output_dir: Optional[Path] = None):
+    def __init__(
+        self,
+        session_manager: OpenCodeSessionManager,
+        output_manager: Optional[UnifiedOutputManager] = None,
+    ):
         self.session_manager = session_manager
-        self.output_manager = UnifiedOutputManager(
-            session_id=session_manager.session_id,
-            base_output_dir=output_dir,
-        )
+        self.output_manager = output_manager if output_manager is not None else NoOpOutputManager()
         self.session_dir = self.output_manager.get_session_dir()
 
-        self.phase1_skill_bootstrap_results: Dict[str, Any] = {}
+        self.phase1_architecture_results: Dict[str, Any] = {}
         self.phase2_results: Dict[str, Any] = {}
         self.phase3_results: Dict[str, Any] = {}
         self.phase4_results: Dict[str, Any] = {}
@@ -283,12 +284,12 @@ class PhasedSecurityAnalyzer:
         logger.info("=" * 80)
         logger.info("Starting full-repository phased analysis")
         logger.info("=" * 80)
-        logger.info("Starting _execute_phase1_skill_bootstrap")
-        self.phase1_skill_bootstrap_results = self._execute_phase1_skill_bootstrap()
+        logger.info("Starting _execute_phase1_architecture_brief")
+        self.phase1_architecture_results = self._execute_phase1_architecture_brief(pr_data)
         logger.info("Starting _execute_phase2")
         self.phase2_results = self._execute_phase2(pr_data)
-        logger.info("Starting _execute_module_pipeline_phase345")
-        self.phase3_results, self.phase4_results, self.phase5_results = self._execute_module_pipeline_phase345(pr_data)
+        logger.info("Starting _execute_phase3_to_phase5_module_pipeline")
+        self.phase3_results, self.phase4_results, self.phase5_results = self._execute_phase3_to_phase5_module_pipeline(pr_data)
         logger.info("Starting _execute_phase6")
         self.phase6_results = self._execute_phase6()
 
@@ -296,26 +297,31 @@ class PhasedSecurityAnalyzer:
         logger.info("Phased analysis completed")
         return final_result
 
-    def _execute_phase1_skill_bootstrap(self) -> Dict[str, Any]:
+    def _execute_phase1_architecture_brief(self, pr_data: Dict[str, Any]) -> Dict[str, Any]:
         phase_key = "phase1"
-        phase_name = "skill_bootstrap"
+        phase_name = "architecture_brief"
         started_at = datetime.now().isoformat()
         start_time = time.time()
 
-        prompt = get_phase1_skill_bootstrap_prompt(
-            cwd_catalog=self._get_default_cwd_catalog(),
+        prompt = get_phase1_architecture_brief_prompt(
+            pr_data=pr_data,
             custom_scan_instructions=self.custom_scan_instructions,
         )
-        self.output_manager.save_text("phase1_skill_bootstrap_prompt.txt", prompt)
+        self.output_manager.save_text("phase1_architecture_prompt.txt", prompt)
 
         response = self.session_manager.send_message(prompt=prompt)
-        # self.output_manager.save_json("phase1_skill_bootstrap_response.json", response)
-        success, result = self._parse_phase_response(response, "phase1_skill_bootstrap")
-        if not success:
+        # self.output_manager.save_json("phase1_architecture_response.json", response)
+        response_text = ""
+        parts = response.get("parts", []) if isinstance(response, dict) else []
+        for part in parts:
+            if part.get("type") == "text":
+                response_text += part.get("text", "")
+
+        if not response_text.strip():
             error_payload = {
                 "phase": phase_key,
                 "name": phase_name,
-                "error": "Failed to parse phase response JSON",
+                "error": "Empty phase response text",
                 "response": response,
             }
             self.output_manager.save_json("phase1_parse_error.json", error_payload)
@@ -326,14 +332,26 @@ class PhasedSecurityAnalyzer:
                 started_at=started_at,
                 ended_at=datetime.now().isoformat(),
                 duration_seconds=time.time() - start_time,
-                prompt_file="phase1_skill_bootstrap_prompt.txt",
-                response_file="phase1_skill_bootstrap_response.json",
+                prompt_file="phase1_architecture_prompt.txt",
                 result_file=None,
-                error_message="Failed to parse phase response JSON",
+                error_message="Empty phase response text",
             )
-            raise PhaseParseError("phase1 parse failed: invalid JSON response")
+            raise PhaseParseError("phase1 failed: empty markdown response")
 
-        self.output_manager.save_json("phase1_skill_bootstrap_result.json", result)
+        self.output_manager.save_text("phase1_architecture_document.md", response_text)
+
+        result = {
+            "document_format": "markdown",
+            "architecture_document_markdown": response_text,
+            "analysis_summary": {
+                "document_generated": True,
+                "notes": [
+                    "Phase1 outputs architecture markdown for Phase2 context",
+                ],
+            },
+        }
+
+        # self.output_manager.save_json("phase1_architecture_result.json", result)
         self._save_phase_metadata(
             phase=phase_key,
             name=phase_name,
@@ -341,9 +359,8 @@ class PhasedSecurityAnalyzer:
             started_at=started_at,
             ended_at=datetime.now().isoformat(),
             duration_seconds=time.time() - start_time,
-            prompt_file="phase1_skill_bootstrap_prompt.txt",
-            response_file="phase1_skill_bootstrap_response.json",
-            result_file="phase1_skill_bootstrap_result.json",
+            prompt_file="phase1_architecture_prompt.txt",
+            details={"document_file": "phase1_architecture_document.md", "document_format": "markdown"},
         )
         return result
 
@@ -355,12 +372,13 @@ class PhasedSecurityAnalyzer:
 
         prompt = get_phase2_context_study_prompt(
             pr_data=pr_data,
+            phase1_results=self.phase1_architecture_results,
             custom_scan_instructions=self.custom_scan_instructions,
         )
         self.output_manager.save_text("phase2_prompt.txt", prompt)
 
         response = self.session_manager.send_message(prompt=prompt)
-        # self.output_manager.save_json("phase2_response.json", response)
+        self.output_manager.save_json("phase2_response.json", response)
         success, result = self._parse_phase_response(response, "phase2")
         if not success:
             error_payload = {
@@ -398,7 +416,7 @@ class PhasedSecurityAnalyzer:
         )
         return result
 
-    def _execute_module_pipeline_phase345(
+    def _execute_phase3_to_phase5_module_pipeline(
         self,
         pr_data: Dict[str, Any],
     ) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
@@ -723,7 +741,7 @@ class PhasedSecurityAnalyzer:
             "findings": raw_defects,
             "analysis_summary": analysis_summary,
             "phased_results": {
-                "phase1": self.phase1_skill_bootstrap_results,
+                "phase1": self.phase1_architecture_results,
                 "phase2": self.phase2_results,
                 "phase3": self.phase3_results,
                 "phase4": self.phase4_results,
@@ -736,75 +754,10 @@ class PhasedSecurityAnalyzer:
         self.output_manager.save_json("final_result.json", final_result)
         return final_result
 
-    def _get_phase2_fallback(self) -> Dict[str, Any]:
-        result = {
-            "modules": [],
-            "analysis_summary": {
-                "repository_type": "unknown",
-                "primary_languages": [],
-                "architecture_style": "unknown",
-                "total_modules": 0,
-                "notes": ["phase2 parsing failed; fallback used"],
-            },
-        }
-        self.output_manager.save_json("phase2_fallback.json", result)
-        return result
-
-    def _get_phase1_skill_bootstrap_fallback(self) -> Dict[str, Any]:
-        result = {
-            "skill_bootstrap_status": "fallback",
-            "skills_requested": [],
-            "skills_loaded": [],
-            "skills_missing": [],
-            "notes": ["phase1 skill bootstrap parsing failed; fallback used"],
-        }
-        self.output_manager.save_json("phase1_skill_bootstrap_fallback.json", result)
-        return result
-
-    def _get_phase3_fallback(self) -> Dict[str, Any]:
-        result = {
-            "module_risk_analysis": [],
-            "analysis_summary": {
-                "modules_analyzed": 0,
-                "high_risk_count": 0,
-                "medium_risk_count": 0,
-                "low_risk_count": 0,
-            },
-        }
-        self.output_manager.save_json("phase3_fallback.json", result)
-        return result
-
-    def _get_phase4_fallback(self) -> Dict[str, Any]:
-        result = {
-            "module_cwd_priorities": [],
-            "analysis_summary": {
-                "modules_total": 0,
-                "cwd_types_considered": 0,
-                "pairs_selected": 0,
-            },
-        }
-        self.output_manager.save_json("phase4_fallback.json", result)
-        return result
-
-    def _get_phase5_fallback(self) -> Dict[str, Any]:
-        result = {
-            "module_defects": [],
-            "analysis_summary": {
-                "modules_scanned": 0,
-                "total_defects": 0,
-                "high": 0,
-                "medium": 0,
-                "low": 0,
-                "review_completed": True,
-            },
-        }
-        self.output_manager.save_json("phase5_fallback.json", result)
-        return result
-
     def get_session_info(self) -> Dict[str, Any]:
         return {
             "session_path": str(self.session_dir),
-            "phase1_completed": bool(self.phase1_skill_bootstrap_results),
+            "phase1_completed": bool(self.phase1_architecture_results),
             "phase2_completed": bool(self.phase2_results),
             "phase3_completed": bool(self.phase3_results),
             "phase4_completed": bool(self.phase4_results),
