@@ -194,11 +194,7 @@ class OpenCodeSessionManager:
             return {"status": "no_active_session"}
         try:
             response = self.client.session.messages(id=self.session_id)
-            if hasattr(response, "to_dict"):
-                return response.to_dict()
-            if isinstance(response, dict):
-                return response
-            return {"raw": response}
+            return response
         except Exception as exc:
             logger.error(f"Failed to get session info: {exc}")
             return {"error": str(exc)}
@@ -352,11 +348,11 @@ if __name__ == "__main__":
         runtime = OpenCodeServerRuntime(repo_path=str(repo_dir))
         runtime.start()
         with get_session_manager() as manager:
-            info = manager.get_session_info()
-            logger.info(f"Session info: {info}")
-
-            test_response = manager.send_message("@explore 搜索一下关于 auth 的所有文件和逻辑")
+            test_response = manager.send_message("这个项目代码的主要编程语言是什么")
             logger.info(f"Test response: {test_response}")
+            info = manager.get_session_info()
+            serializable_history = [x.model_dump(mode="json", warnings=False) for x in info]
+
         runtime.stop()
     except Exception as exc:
         logger.error(f"Test failed: {exc}")

@@ -218,7 +218,8 @@ class PhasedSecurityAnalyzer:
 
             session_history = sub_session.get_session_info()
             serializable_history = [x.model_dump(mode="json", warnings=False) for x in session_history]
-            # self.output_manager.save_json(f"module_{index}_phase5_session_messages.json", serializable_history)
+            # self.output_manager.save_json(f"module_{index}_phase5_session_messages.json", session_history)
+            # self.output_manager.save_json(f"module_{index}_phase5_erializable_messages.json", serializable_history)
 
             expected_skills = [
                 item.get("skill_name", "")
