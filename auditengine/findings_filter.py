@@ -183,12 +183,17 @@ class FindingAnalyzer:
     
     def _generate_system_prompt(self) -> str:
         """生成系统提示词"""
-        return """你是一名安全专家，正在审查来自自动化代码审计工具的发现。
-你的任务是过滤掉误报和低信号发现，以减少警报疲劳。
-你必须在提高精度的同时保持高召回率（不要漏掉真正的漏洞）。
+        return """你是一名资深代码安全审计专家，正在复核自动化安全审计发现。
+你的任务是对每条发现做“真实性判定 + 风险强度评估”，并给出是否保留。
 
-必须严格按照用户提示中指定的格式返回有效的JSON。
-不要包含解释文本、Markdown格式或代码块。"""
+硬性要求：
+1. 必须逐条评估所有 finding_index，不得遗漏。
+2. 必须区分两类分数：
+   - confidence_score(1-10): 你对结论正确性的把握度（证据充分性）。
+   - risk_score(1-10): 该问题若成立时的风险强度（影响与可利用性）。
+3. 必须输出 keep_finding（true/false）。
+4. 必须严格按照用户提示中指定的格式返回有效JSON。
+5. 不要包含解释文本、Markdown格式或代码块。"""
     
     def analyze_findings_batch(self,
                                findings: List[Dict[str, Any]],
@@ -214,10 +219,6 @@ class FindingAnalyzer:
                 for part in response_data['parts']:
                     if part.get('type') == 'text':
                         response_text += part.get('text', '')
-            # self.output_manager.save_json(
-            #     f"{call_id}_response.json",
-            #     {"final_response_text": response_text, "raw_response": response_data}
-            # )
 
             if not response_text:
                 return False, {}, "响应文本为空"
@@ -298,48 +299,6 @@ PR上下文:
             filtering_section = custom_filtering_instructions
         else:
             filtering_section = """ 排除检测出来的测试部分等和生产业务不相关的缺陷 """
-#             filtering_section = """硬性排除规则 - 自动排除匹配以下模式的发现：
-# 1. 拒绝服务漏洞或资源耗尽攻击
-# 2. 存储在磁盘上的密钥/凭据（这些由单独流程管理）
-# 3. 速率限制问题或服务过载场景（服务不需要实现速率限制）
-# 4. 内存消耗或CPU耗尽问题
-# 5. 缺乏输入验证但没有已证明安全影响的非安全关键字段
-# 6. GitHub Action工作流中的输入清理问题
-# 7. 缺少安全强化措施。代码不需要实现所有的安全最佳实践，只要避免明显的漏洞即可。
-# 8. 理论上而非实际问题的竞态条件或计时攻击。只有在竞态条件极其严重时才报告。
-# 9. 与过时第三方库相关的漏洞。这些由单独管理，不应在此报告。
-# 10. 缓冲区溢出或释放后使用等内存安全问题在Rust中是不可能存在的。不要报告Rust代码中的内存安全问题。
-# 11. 仅作为单元测试或仅在测试运行中使用的文件。
-# 12. 日志欺骗问题。将未经清理的用户输入输出到日志不是漏洞。
-# 13. 仅控制路径的SSRF漏洞。只有当SSRF能够控制主机或协议时才是问题。
-# 14. 在AI系统提示中包含用户控制的内容不是漏洞。通常，在AI提示中包含用户输入不是漏洞。
-# 15. 不要报告与向项目添加不可从相关包仓库获得的依赖相关的问题。依赖不可公开访问的内部库不是漏洞。
-# 16. 不要报告导致代码崩溃但实际上不是漏洞的问题。例如，未定义或null的变量不是漏洞。
-  
-# 信号质量标准 - 对于剩余的发现，评估：
-# 1. 是否存在具体的、可利用的漏洞和清晰的攻击路径？
-# 2. 这代表真正的安全风险还是理论最佳实践？
-# 3. 是否有具体的代码位置和重现步骤？
-# 4. 这个发现对安全团队来说是否可操作？
-  
-# 先例标准 - 
-# 1. 以明文形式记录高价值密钥是漏洞。否则，不要报告密钥理论暴露的问题。记录URL被认为是安全的。记录请求头被认为是危险的，因为它们可能包含凭据。
-# 2. UUID可以假设为不可猜测，不需要验证。如果漏洞需要猜测UUID，则不是有效的漏洞。
-# 3. 审计日志不是关键安全功能，如果它们缺失或修改，不应报告为漏洞。
-# 4. 环境变量和CLI标志是可信值。攻击者无法在安全环境中修改它们。任何依赖于控制环境变量的攻击都是无效的。
-# 5. 内存或文件描述符泄漏等资源管理问题不是有效的。
-# 6. 细微或低影响的Web漏洞，如标签劫持、XS-Leaks、原型污染和开放重定向，不是有效的。
-# 7. 与过时第三方库相关的漏洞。这些由单独管理，不应在此报告。
-# 8. React通常对XSS安全。React不需要清理或转义用户输入，除非它使用dangerouslySetInnerHTML或类似方法。不要报告React组件或tsx文件中的XSS漏洞，除非它们使用不安全的方法。
-# 9. 大多数GitHub Action工作流中的漏洞在实践中不可利用。在验证GitHub Action工作流漏洞之前，确保它是具体的且有非常具体的攻击路径。
-# 10. 客户端TS代码中缺少权限检查或身份验证不是漏洞。客户端代码不受信任，不需要实现这些检查，它们在服务器端处理。这同样适用于所有将不受信任数据发送到后端的流程，后端负责验证和清理所有输入。
-# 11. 只有当中等严重性发现是明显和具体的问题时才包含。
-# 12. 大多数IPython笔记本(*.ipynb文件)中的漏洞在实践中不可利用。在验证笔记本漏洞之前，确保它是具体的且有非常具体的攻击路径。
-# 13. 记录非PII数据不是漏洞，即使数据可能是敏感的。只有当日志漏洞暴露敏感信息（如密钥、密码或个人身份信息(PII)）时才报告。
-# 14. Shell脚本中的命令注入漏洞在实践中通常不可利用，因为Shell脚本通常不会使用不受信任的用户输入运行。只有当Shell脚本中的命令注入漏洞对不受信任的输入有具体且有非常具体的攻击路径时才报告。
-# 15. 客户端JavaScript/TypeScript文件（.js, .ts, .tsx, .jsx）中的SSRF（服务器端请求伪造）漏洞是无效的，因为客户端代码无法做出会绕过防火墙或访问内部资源的服务器端请求。只在服务器端代码中报告SSRF（例如，已知在服务器端运行的Python或JS）。相同逻辑适用于路径遍历攻击，它们在客户端JS中不是问题。
-# 16. 使用../的路径遍历攻击在触发HTTP请求时通常不是问题。这些通常只在读取文件时相关，其中../可能允许访问意外文件。
-# 17. 注入到日志查询中通常不是问题。只有当注入明确导致向外部用户暴露敏感数据时才报告。"""
         return f"""我需要你批量分析来自自动化代码审计的安全发现，并确定哪些应被过滤。
 
 {pr_info}
@@ -349,12 +308,27 @@ PR上下文:
 - 你必须根据这些路径自行查找相关文件、上下文与调用链后再判断。
 - 不要依赖我手工提供文件内容；请基于代码库真实上下文做决定。
 
+排除规则：
 {filtering_section}
 
-分配1-10的置信度评分：
-- 1-3：低置信度，可能是误报或噪音
-- 4-6：中等置信度，需要进一步调查
-- 7-10：高置信度，可能是真正的漏洞
+请按以下“逐条评估方法”执行：
+1) 证据定位：根据 file/line 查找代码上下文，并提取关键调用链（输入来源 -> 处理函数 -> 风险点/敏感操作）。
+2) 真实性判定：判断该问题是否真实存在，而不是理论推测；判断攻击前置条件是否现实；判断现有防护是否已阻断风险。
+3) 风险分析：若问题真实存在，评估实际影响范围与可利用性，给出 risk_score（1-10）。
+4) 置信度分析：根据证据完整度给出 confidence_score（1-10）。调用链闭合、可达性清晰、证据充分时置信度应更高。
+5) 最终决策：
+   - keep_finding=true：问题真实存在且具有实际安全意义；
+   - keep_finding=false：误报、不可达、仅理论风险、或缺乏关键证据。
+
+评分标准：
+- confidence_score（结论把握度）
+  - 1-3：证据薄弱，结论不可靠
+  - 4-6：有一定证据，但仍需复核
+  - 7-10：证据充分，结论可靠
+- risk_score（风险强度）
+  - 1-3：低风险/影响很小
+  - 4-6：中等风险
+  - 7-10：高风险/可造成显著安全影响
 
 要分析的安全发现列表：
 ```json
@@ -368,6 +342,7 @@ PR上下文:
       "finding_index": 0,
       "keep_finding": true,
       "confidence_score": 8,
+      "risk_score": 7,
       "exclusion_reason": null,
       "justification": "清晰的SQL注入漏洞，具有具体利用路径",
       "checked_paths": ["src/auth/service.py", "src/auth/routes.py"],
@@ -580,6 +555,12 @@ class FindingsFilter:
                     except (TypeError, ValueError):
                         confidence = 10.0
 
+                    risk_raw = decision.get('risk_score', confidence)
+                    try:
+                        risk_score = float(risk_raw)
+                    except (TypeError, ValueError):
+                        risk_score = confidence
+
                     keep_finding = bool(decision.get('keep_finding', True))
                     justification = decision.get('justification', '')
                     exclusion_reason = decision.get('exclusion_reason')
@@ -592,6 +573,7 @@ class FindingsFilter:
                         excluded_ai.append({
                             "finding": finding,
                             "confidence_score": confidence,
+                            "risk_score": risk_score,
                             "exclusion_reason": exclusion_reason or f"Low confidence score: {confidence}",
                             "justification": justification,
                             "checked_paths": checked_paths,
@@ -603,6 +585,7 @@ class FindingsFilter:
                         enriched_finding = finding.copy()
                         enriched_finding['_filter_metadata'] = {
                             'confidence_score': confidence,
+                            'risk_score': risk_score,
                             'justification': justification,
                             'checked_paths': checked_paths,
                             'call_chain_summary': call_chain_summary,

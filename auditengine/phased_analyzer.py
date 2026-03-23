@@ -183,7 +183,6 @@ class PhasedSecurityAnalyzer:
             )
             self.output_manager.save_text(f"module_{index}_phase4_prompt.txt", prompt4)
             response4 = sub_session.send_message(prompt=prompt4)
-            # self.output_manager.save_json(f"module_{index}_phase4_response.json", response4)
             ok4, parsed4 = self._parse_phase_response(response4, f"module_{index}_phase4")
             if not ok4:
                 raise PhaseParseError(f"phase4 parse failed for module '{module_name}'")
@@ -204,16 +203,12 @@ class PhasedSecurityAnalyzer:
             )
             self.output_manager.save_text(f"module_{index}_phase5_prompt.txt", prompt5)
             response5 = sub_session.send_message(prompt=prompt5)
-            # self.output_manager.save_json(f"module_{index}_phase5_response.json", response5)
             ok5, parsed5 = self._parse_phase_response(response5, f"module_{index}_phase5")
             if not ok5:
                 raise PhaseParseError(f"phase5 parse failed for module '{module_name}'")
 
             session_history = sub_session.get_session_info()
-            # serializable_history = session_history
             serializable_history = [x.model_dump(mode="json", warnings=False) for x in session_history]
-            # self.output_manager.save_json(f"module_{index}_phase5_session_messages.json", session_history)
-            # self.output_manager.save_json(f"module_{index}_phase5_erializable_messages.json", serializable_history)
 
             expected_skills = [
                 item.get("skill_name", "")
@@ -221,7 +216,6 @@ class PhasedSecurityAnalyzer:
                 if isinstance(item, dict)
             ]
             skill_audit = self._audit_skill_usage(serializable_history, expected_skills)
-            # self.output_manager.save_json(f"module_{index}_phase5_skill_audit.json", skill_audit)
 
             phase5_selected = self._pick_module_entry(parsed5.get("module_defects", []), module_name)
             if not phase5_selected:
