@@ -341,8 +341,8 @@ class OpenCodeServerRuntime:
             self._server_pgid = None
             self._owns_server = False
 
-        if OpenCodeSessionManager._is_port_listening(self.port):
-            OpenCodeSessionManager._kill_port_listener(self.port)
+        # if OpenCodeSessionManager._is_port_listening(self.port):
+        #     OpenCodeSessionManager._kill_port_listener(self.port)
 
         logger.info("OpenCode server stopped.")
 
