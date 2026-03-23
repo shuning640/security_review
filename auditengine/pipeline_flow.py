@@ -13,6 +13,7 @@ from auditengine.constants import (
     ENABLE_OPENCODE_FILTERING,
     FALSE_POSITIVE_FILTERING_INSTRUCTIONS,
     GIT_URL,
+    OUTPUT_DIR,
     PR_NUMBER,
     REPO_NAME,
     REPO_PATH,
@@ -127,9 +128,11 @@ def initialize_shared_runtime(repo_dir: Path, timeout_seconds: int) -> Tuple[Ope
 
     shared_session_manager = OpenCodeSessionManager(timeout_seconds=timeout_seconds)
     shared_session_manager.create_session()
+    effective_output_dir = OUTPUT_DIR or str(repo_dir)
+    logger.info(f"Using output directory: {effective_output_dir}")
     output_manager = UnifiedOutputManager(
         session_id=shared_session_manager.session_id,
-        base_output_dir=str(repo_dir),
+        base_output_dir=effective_output_dir,
     )
     return shared_server_runtime, shared_session_manager, output_manager
 
