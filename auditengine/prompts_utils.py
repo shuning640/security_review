@@ -15,7 +15,7 @@ def get_pr_diff(pr_data):
       pr_diff = "\n".join(diff_parts)
   return pr_diff
 
-def get_security_audit_prompt(pr_data, pr_diff=None, include_diff=True, custom_scan_instructions=None):
+def get_security_audit_prompt(pr_data, pr_diff=None, include_diff=True, custom_scan_instructions=None, execution_mode="tool_call", repository_code_context=""):
     """Generate security audit prompt for the analysis runtime.
     
     Args:
@@ -47,7 +47,13 @@ PR DIFF CONTENT:
 Review the complete diff above. This contains all code changes in the PR.
 """
     elif pr_diff and not include_diff:
-        diff_section = """
+        if execution_mode == "embedded_context":
+            diff_section = """
+
+NOTE: PR diff was omitted due to size constraints. You do not have repository exploration tools in this mode. Base your analysis only on the provided context.
+"""
+        else:
+            diff_section = """
 
 NOTE: PR diff was omitted due to size constraints. Please use the file exploration tools to examine the specific files that were changed in this PR.
 """
@@ -57,6 +63,23 @@ NOTE: PR diff was omitted due to size constraints. Please use the file explorati
     if custom_scan_instructions:
         custom_categories_section = f"\n{custom_scan_instructions}\n"
     
+    capability_section = ""
+    if execution_mode == "embedded_context":
+        capability_section = f"""
+MODEL CAPABILITY MODE: embedded_context
+- You do not have repository exploration tools.
+- You must only use provided diff and context.
+- If evidence is insufficient, do not speculate.
+
+REPOSITORY CODE CONTEXT:
+{repository_code_context or "(not provided)"}
+"""
+    else:
+        capability_section = """
+MODEL CAPABILITY MODE: tool_call
+- You may use repository exploration tools to gather additional code evidence.
+"""
+
     return f"""
 You are a senior security engineer conducting a focused security review of GitHub PR #{pr_data['number']}: "{pr_data['title']}"
 
@@ -69,6 +92,8 @@ CONTEXT:
 
 Files modified:
 {files_changed}{diff_section}
+
+{capability_section}
 
 OBJECTIVE:
 Perform a security-focused code review to identify HIGH-CONFIDENCE security vulnerabilities that could have real exploitation potential. This is not a general code review - focus ONLY on security implications newly added by this PR. Do not comment on existing security concerns.
@@ -124,7 +149,7 @@ Additional notes:
 
 ANALYSIS METHODOLOGY:
 
-Phase 1 - Repository Context Research (Use file search tools):
+Phase 1 - Repository Context Research:
 - Identify existing security frameworks and libraries in use
 - Look for established secure coding patterns in the codebase
 - Examine existing sanitization and validation patterns
@@ -189,7 +214,7 @@ IMPORTANT EXCLUSIONS - DO NOT REPORT:
 - Memory consumption or CPU exhaustion issues.
 - Lack of input validation on non-security-critical fields. If there isn't a proven problem from a lack of input validation, don't report it.
 
-Begin your analysis now. Use the repository exploration tools to understand the codebase context, then analyze the PR changes for security implications.
+Begin your analysis now. First establish repository context using available evidence, then analyze the PR changes for security implications.
 
 Your final reply must contain the JSON and nothing else. You should not reply again after outputting the JSON.
 """

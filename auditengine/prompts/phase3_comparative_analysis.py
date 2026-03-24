@@ -5,7 +5,9 @@ import json
 
 def get_phase3_comparative_analysis_prompt(
     pr_data: dict,
-    phase2_results: dict = None
+    phase2_results: dict = None,
+    execution_mode: str = "tool_call",
+    module_code_context: str = "",
 ) -> str:
     """Generate phase-3 prompt for per-module business flow and risk analysis."""
 
@@ -13,6 +15,23 @@ def get_phase3_comparative_analysis_prompt(
     modules = phase2_results.get("modules", []) if isinstance(phase2_results, dict) else []
 
     modules_context = json.dumps(modules, indent=2, ensure_ascii=False)
+
+    capability_section = ""
+    if execution_mode == "embedded_context":
+        capability_section = f"""
+执行模式：embedded_context（裸模型）
+- 你不具备自主读取仓库文件的能力。
+- 你必须仅基于下方提供的“模块代码上下文”进行业务流与风险分析。
+- 若证据不足，请降低 confidence 或不报风险。
+
+模块代码上下文：
+{module_code_context or "未提供模块代码上下文。请保守输出。"}
+"""
+    else:
+        capability_section = """
+执行模式：tool_call（OpenCode）
+- 你可以通过工具读取模块相关文件补全证据。
+"""
 
     return f"""你是一名资深应用安全工程师，正在执行模块级安全分析的 Phase 3：模块业务逻辑与风险分析。
 
@@ -22,6 +41,8 @@ def get_phase3_comparative_analysis_prompt(
 
 当前待分析模块信息：
 {modules_context}
+
+{capability_section.strip()}
 
 任务要求：
 1) 分析当前模块核心业务流程（包含调用链、关键函数、关键入口与出口、状态变化）。

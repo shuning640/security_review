@@ -77,6 +77,7 @@ def main():
             use_phased_analysis=use_phased_analysis,
             scan_scope=scan_scope,
             repo_name=repo_name,
+            repo_dir=repo_dir,
             pr_number=pr_number,
             pr_data=pr_data,
             scope_client=scope_client,

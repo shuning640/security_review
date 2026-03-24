@@ -4,13 +4,33 @@ from typing import Optional
 
 
 def get_phase1_architecture_brief_prompt(
-    pr_data: dict
+    pr_data: dict,
+    execution_mode: str = "tool_call",
+    repository_code_context: str = "",
 ) -> str:
     """Generate phase-1 prompt for repository architecture brief."""
 
     repo_name = pr_data.get("head", {}).get("repo", {}).get("full_name", "unknown")
     repo_path = pr_data.get("repository_path", "unknown")
     total_files = pr_data.get("changed_files", 0)
+
+    capability_section = ""
+    if execution_mode == "embedded_context":
+        capability_section = f"""
+执行模式：embedded_context（裸模型）
+- 你不具备自主读取仓库文件的能力。
+- 你必须仅基于下方提供的“仓库代码上下文”进行分析。
+- 若证据不足，请在文档中明确标注 unknown，不要臆造。
+
+仓库代码上下文：
+{repository_code_context or "未提供代码上下文。请仅基于已给信息输出保守结论。"}
+"""
+    else:
+        capability_section = """
+执行模式：tool_call（OpenCode）
+- 你可以通过工具读取仓库文件并补全证据。
+- 在可用时应主动核对关键路径与入口文件。
+"""
 
     return f"""你是一名资深软件架构师，正在执行阶段化安全检测流程的 Phase 1：软件设计文档生成。
 
@@ -30,6 +50,8 @@ def get_phase1_architecture_brief_prompt(
 4) 梳理数据与状态：关键数据存储、跨组件数据流、状态转换与持久化路径。
 5) 标注信任边界与关键资产：外部输入边界、跨服务边界、数据库写入边界、敏感资产位置。
 6) 所有结论必须基于真实代码路径，不要臆造。
+
+{capability_section.strip()}
 
 输出格式要求：
 - 输出为结构化 Markdown 文档（不是 JSON）。

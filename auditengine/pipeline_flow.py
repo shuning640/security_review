@@ -21,7 +21,7 @@ from auditengine.constants import (
 from auditengine.findings_filter import FindingsFilter
 from auditengine.logger import get_logger
 from auditengine.prompts_utils import get_security_audit_prompt
-from auditengine.session_manager import OpenCodeServerRuntime, OpenCodeSessionManager
+from auditengine.session_manager import get_server_runtime, get_session_manager
 from auditengine.unified_output_manager import UnifiedOutputManager
 
 from auditengine.pipeline_clients import GitHubActionClient, RepositoryScopeClient
@@ -122,11 +122,12 @@ def prepare_pr_data(scan_scope: str, scope_client: Any, repo_dir: Path) -> Tuple
     return repo_name, pr_number, pr_data
 
 
-def initialize_shared_runtime(repo_dir: Path, timeout_seconds: int) -> Tuple[OpenCodeServerRuntime, OpenCodeSessionManager, UnifiedOutputManager]:
-    shared_server_runtime = OpenCodeServerRuntime(repo_path=str(repo_dir))
-    shared_server_runtime.start()
+def initialize_shared_runtime(repo_dir: Path, timeout_seconds: int) -> Tuple[Optional[Any], Any, UnifiedOutputManager]:
+    shared_server_runtime = get_server_runtime(repo_path=str(repo_dir))
+    if shared_server_runtime is not None:
+        shared_server_runtime.start()
 
-    shared_session_manager = OpenCodeSessionManager(timeout_seconds=timeout_seconds)
+    shared_session_manager = get_session_manager(timeout_seconds=timeout_seconds)
     shared_session_manager.create_session()
     effective_output_dir = OUTPUT_DIR or str(repo_dir)
     logger.info(f"Using output directory: {effective_output_dir}")
@@ -139,7 +140,7 @@ def initialize_shared_runtime(repo_dir: Path, timeout_seconds: int) -> Tuple[Ope
 
 def initialize_findings_filter(
     custom_filtering_instructions: Optional[str] = None,
-    external_session_manager: Optional[OpenCodeSessionManager] = None,
+    external_session_manager: Optional[Any] = None,
 ) -> FindingsFilter:
     try:
         use_ai_filtering = ENABLE_OPENCODE_FILTERING
@@ -175,7 +176,7 @@ def apply_findings_filter_with_shared_session(
     original_findings: List[Dict[str, Any]],
     pr_context: Dict[str, Any],
     github_client: Any,
-    shared_session: Optional[OpenCodeSessionManager] = None,
+    shared_session: Optional[Any] = None,
     output_manager: Optional[UnifiedOutputManager] = None,
     custom_filtering_instructions: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
@@ -249,7 +250,7 @@ def run_audit_workflow(
     repo_dir: Path,
     pr_data: Dict[str, Any],
     scan_scope: str,
-    shared_session_manager: OpenCodeSessionManager,
+    shared_session_manager: Any,
     output_manager: UnifiedOutputManager,
     custom_scan_instructions: Optional[str],
 ) -> Tuple[bool, str, Dict[str, Any]]:
@@ -265,6 +266,7 @@ def run_audit_workflow(
         pr_data=pr_data,
         custom_scan_instructions=custom_scan_instructions,
         include_diff=(scan_scope == "pr"),
+        execution_mode="embedded_context" if str(getattr(shared_session_manager, "backend", "opencode")) == "openai_compatible" else "tool_call",
     )
     return audit_runner.run_security_audit(repo_dir, prompt)
 
@@ -274,10 +276,11 @@ def finalize_outputs(
     use_phased_analysis: bool,
     scan_scope: str,
     repo_name: str,
+    repo_dir: Path,
     pr_number: int,
     pr_data: Dict[str, Any],
     scope_client: Any,
-    shared_session_manager: OpenCodeSessionManager,
+    shared_session_manager: Any,
     output_manager: UnifiedOutputManager,
     workflow_started_at: str,
     workflow_start_time: float,
@@ -296,6 +299,7 @@ def finalize_outputs(
 
     pr_context = {
         "repo_name": repo_name,
+        "repo_path": str(repo_dir),
         "pr_number": pr_number,
         "title": pr_data.get("title", ""),
         "description": pr_data.get("body", ""),

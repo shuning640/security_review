@@ -2,6 +2,7 @@
 
 import json
 import time
+from urllib.parse import urlparse
 from pathlib import Path
 from datetime import datetime
 from typing import Any, Dict, Optional, Tuple, List
@@ -16,9 +17,9 @@ from auditengine.prompts import (
     get_phase4_cwd_routing_prompt,
     get_phase5_vulnerability_assessment_prompt,
 )
-from auditengine.session_manager import OpenCodeSessionManager
 from auditengine.unified_output_manager import UnifiedOutputManager, NoOpOutputManager
-from auditengine.constants import CWD_CATALOG_PATH, PHASE_PARALLELISM
+from auditengine.constants import CWD_CATALOG_PATH, PHASE_PARALLELISM, PROMPT_TOKEN_LIMIT
+from auditengine.token_utils import count_tokens, truncate_to_token_limit
 
 logger = get_logger(__name__)
 
@@ -32,7 +33,7 @@ class PhasedSecurityAnalyzer:
 
     def __init__(
         self,
-        session_manager: OpenCodeSessionManager,
+        session_manager: Any,
         output_manager: Optional[UnifiedOutputManager] = None,
     ):
         self.session_manager = session_manager
@@ -47,6 +48,7 @@ class PhasedSecurityAnalyzer:
         self.phase6_results: Dict[str, Any] = {}
         self.phase_metadata: Dict[str, Any] = {}
         self.repo_dir: Optional[Path] = None
+        self._repo_code_context_cache: Optional[str] = None
 
         logger.info(f"Phased analyzer initialized. Session dir: {self.session_dir}")
 
@@ -140,22 +142,18 @@ class PhasedSecurityAnalyzer:
     ) -> Tuple[int, Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
         module_name = module.get("module_name", f"module_{index}")
         module_context = {"modules": [module]}
-        base_model, base_provider = self.session_manager.model, self.session_manager.provider_id
-
-        sub_session = OpenCodeSessionManager(
-            host=self.session_manager.host,
-            timeout_seconds=self.session_manager.timeout_seconds,
-            model=base_model,
-            provider_id=base_provider,
-            port=self.session_manager.port,
-        )
+        sub_session = self.session_manager.spawn_sub_session()
+        embedded_mode = self._is_embedded_context_mode(sub_session)
+        module_code_context = self._build_module_code_context(module) if embedded_mode else ""
 
         try:
             sub_session.create_session()
 
             prompt3 = get_phase3_comparative_analysis_prompt(
                 pr_data=pr_data,
-                phase2_results=module_context
+                phase2_results=module_context,
+                execution_mode="embedded_context" if embedded_mode else "tool_call",
+                module_code_context=module_code_context,
             )
             self.output_manager.save_text(f"module_{index}_phase3_prompt.txt", prompt3)
             response3 = sub_session.send_message(prompt=prompt3)
@@ -179,7 +177,9 @@ class PhasedSecurityAnalyzer:
                 pr_data=pr_data,
                 phase2_results=module_context,
                 phase3_results={"module_risk_analysis": [phase3_selected]},
-                cwd_catalog=cwd_catalog
+                cwd_catalog=cwd_catalog,
+                execution_mode="embedded_context" if embedded_mode else "tool_call",
+                module_code_context=module_code_context,
             )
             self.output_manager.save_text(f"module_{index}_phase4_prompt.txt", prompt4)
             response4 = sub_session.send_message(prompt=prompt4)
@@ -199,7 +199,13 @@ class PhasedSecurityAnalyzer:
                 pr_data=pr_data,
                 phase2_results=module_context,
                 phase3_results={"module_risk_analysis": [phase3_selected]},
-                phase4_results={"module_cwd_priorities": [phase4_selected]}
+                phase4_results={"module_cwd_priorities": [phase4_selected]},
+                embedded_skill_context=self._build_embedded_skill_context(
+                    phase4_selected.get("cwd_rankings", []),
+                    cwd_catalog,
+                ) if embedded_mode else None,
+                skill_execution_mode="embedded_prompt" if embedded_mode else "tool_call",
+                module_code_context=module_code_context,
             )
             self.output_manager.save_text(f"module_{index}_phase5_prompt.txt", prompt5)
             response5 = sub_session.send_message(prompt=prompt5)
@@ -207,15 +213,27 @@ class PhasedSecurityAnalyzer:
             if not ok5:
                 raise PhaseParseError(f"phase5 parse failed for module '{module_name}'")
 
-            session_history = sub_session.get_session_info()
-            serializable_history = [x.model_dump(mode="json", warnings=False) for x in session_history]
-
             expected_skills = [
                 item.get("skill_name", "")
                 for item in phase4_selected.get("cwd_rankings", [])
                 if isinstance(item, dict)
             ]
-            skill_audit = self._audit_skill_usage(serializable_history, expected_skills)
+            if getattr(sub_session, "supports_skill_trace", False):
+                session_history = sub_session.get_session_info()
+                serializable_history = [x.model_dump(mode="json", warnings=False) for x in session_history]
+                skill_audit = self._audit_skill_usage(serializable_history, expected_skills)
+            else:
+                skill_audit = {
+                    "expected_skills": expected_skills,
+                    "skill_tool_calls": 0,
+                    "status_counts": {"completed": 0, "error": 0, "running": 0, "pending": 0, "unknown": 0},
+                    "attempted_skills": [],
+                    "completed_skills": [],
+                    "errored_skills": [],
+                    "skill_tool_observed": False,
+                    "validation_enabled": False,
+                    "execution_mode": "embedded_prompt",
+                }
 
             phase5_selected = self._pick_module_entry(parsed5.get("module_defects", []), module_name)
             if not phase5_selected:
@@ -224,19 +242,23 @@ class PhasedSecurityAnalyzer:
                     "defects": [],
                 }
 
-            attempted_skills = set(skill_audit.get("attempted_skills", []))
-            completed_skills = set(skill_audit.get("completed_skills", []))
-            skill_tool_observed = bool(skill_audit.get("skill_tool_observed", False))
-            for defect in phase5_selected.get("defects", []):
-                skill_name = str(defect.get("skill_name", "")).strip()
-                if skill_name and skill_name in completed_skills:
-                    defect["skill_load_status"] = "loaded_verified"
-                elif skill_name and skill_name in attempted_skills:
-                    defect["skill_load_status"] = "failed_verified"
-                elif skill_tool_observed:
-                    defect["skill_load_status"] = "unknown_unmatched_trace"
-                else:
-                    defect["skill_load_status"] = "unknown_no_trace"
+            if getattr(sub_session, "supports_skill_trace", False):
+                attempted_skills = set(skill_audit.get("attempted_skills", []))
+                completed_skills = set(skill_audit.get("completed_skills", []))
+                skill_tool_observed = bool(skill_audit.get("skill_tool_observed", False))
+                for defect in phase5_selected.get("defects", []):
+                    skill_name = str(defect.get("skill_name", "")).strip()
+                    if skill_name and skill_name in completed_skills:
+                        defect["skill_load_status"] = "loaded_verified"
+                    elif skill_name and skill_name in attempted_skills:
+                        defect["skill_load_status"] = "failed_verified"
+                    elif skill_tool_observed:
+                        defect["skill_load_status"] = "unknown_unmatched_trace"
+                    else:
+                        defect["skill_load_status"] = "unknown_no_trace"
+            else:
+                for defect in phase5_selected.get("defects", []):
+                    defect["skill_load_status"] = "not_verified_embedded_skill"
 
             phase5_selected["skill_audit"] = {
                 "skill_tool_observed": skill_audit.get("skill_tool_observed", False),
@@ -246,6 +268,8 @@ class PhasedSecurityAnalyzer:
                 "completed_skills": skill_audit.get("completed_skills", []),
                 "errored_skills": skill_audit.get("errored_skills", []),
                 "status_counts": skill_audit.get("status_counts", {}),
+                "validation_enabled": skill_audit.get("validation_enabled", True),
+                "execution_mode": skill_audit.get("execution_mode", "tool_call"),
             }
             self.output_manager.save_json(f"module_{index}_phase5_result.json", phase5_selected)
 
@@ -283,9 +307,12 @@ class PhasedSecurityAnalyzer:
         phase_name = "architecture_brief"
         started_at = datetime.now().isoformat()
         start_time = time.time()
+        embedded_mode = self._is_embedded_context_mode(self.session_manager)
 
         prompt = get_phase1_architecture_brief_prompt(
-            pr_data=pr_data
+            pr_data=pr_data,
+            execution_mode="embedded_context" if embedded_mode else "tool_call",
+            repository_code_context=self._build_repo_code_context() if embedded_mode else "",
         )
         self.output_manager.save_text("phase1_architecture_prompt.txt", prompt)
 
@@ -349,10 +376,13 @@ class PhasedSecurityAnalyzer:
         phase_name = "context_study"
         started_at = datetime.now().isoformat()
         start_time = time.time()
+        embedded_mode = self._is_embedded_context_mode(self.session_manager)
 
         prompt = get_phase2_context_study_prompt(
             pr_data=pr_data,
-            phase1_results=self.phase1_architecture_results
+            phase1_results=self.phase1_architecture_results,
+            execution_mode="embedded_context" if embedded_mode else "tool_call",
+            repository_code_context=self._build_repo_code_context() if embedded_mode else "",
         )
         self.output_manager.save_text("phase2_prompt.txt", prompt)
 
@@ -750,6 +780,154 @@ class PhasedSecurityAnalyzer:
             ] if self.session_dir.exists() else [],
         }
 
+    @staticmethod
+    def _is_embedded_context_mode(session_manager: Any) -> bool:
+        return str(getattr(session_manager, "backend", "opencode")) == "openai_compatible"
+
+    @staticmethod
+    def _is_probably_text_file(path: Path) -> bool:
+        allowed_suffixes = {
+            ".py", ".go", ".java", ".kt", ".js", ".ts", ".tsx", ".jsx", ".rs", ".c", ".cc",
+            ".cpp", ".h", ".hpp", ".cs", ".rb", ".php", ".swift", ".scala", ".sh", ".sql",
+            ".yaml", ".yml", ".json", ".toml", ".ini", ".cfg", ".md", ".txt",
+        }
+        if path.suffix.lower() in allowed_suffixes:
+            return True
+        return path.suffix == ""
+
+    def _read_file_snippet(self, file_path: Path, max_chars_per_file: int = 6000) -> str:
+        try:
+            if not file_path.exists() or not file_path.is_file():
+                return ""
+            if file_path.stat().st_size > 1024 * 1024:
+                return ""
+            if not self._is_probably_text_file(file_path):
+                return ""
+            content = file_path.read_text(encoding="utf-8", errors="ignore")
+            if not content.strip():
+                return ""
+            return content[:max_chars_per_file]
+        except Exception:
+            return ""
+
+    def _build_repo_code_context(self, max_files: int = 5, max_total_chars: int = 80000) -> str:
+        if self._repo_code_context_cache is not None:
+            return self._repo_code_context_cache
+        if self.repo_dir is None or not self.repo_dir.exists():
+            self._repo_code_context_cache = ""
+            return ""
+
+        preferred_names = {
+            "main.py", "app.py", "server.py", "manage.py", "__init__.py", "Dockerfile", "docker-compose.yml",
+            "README.md", "pyproject.toml", "setup.py", "go.mod", "package.json", "pom.xml", "build.gradle",
+        }
+
+        preferred = []
+        others = []
+        for path in self.repo_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(self.repo_dir)
+            rel_text = rel.as_posix()
+            if rel_text.startswith(".git/"):
+                continue
+            if any(seg in {"node_modules", "dist", "build", ".venv", "venv", "__pycache__"} for seg in rel.parts):
+                continue
+            if not self._is_probably_text_file(path):
+                continue
+            if path.name in preferred_names:
+                preferred.append(path)
+            else:
+                others.append(path)
+
+        selected = preferred + others
+        blocks: List[str] = []
+        total_chars = 0
+        max_tokens = max(1024, int(PROMPT_TOKEN_LIMIT * 0.45))
+        total_tokens = 0
+        for path in selected[:max_files * 2]:
+            if len(blocks) >= max_files or total_chars >= max_total_chars or total_tokens >= max_tokens:
+                break
+            snippet = self._read_file_snippet(path)
+            if not snippet:
+                continue
+            rel = path.relative_to(self.repo_dir).as_posix()
+            block = f"### File: {rel}\n```text\n{snippet}\n```"
+            if total_chars + len(block) > max_total_chars:
+                break
+            block_tokens = count_tokens(block, self.session_manager.model)
+            if total_tokens + block_tokens > max_tokens:
+                break
+            blocks.append(block)
+            total_chars += len(block)
+            total_tokens += block_tokens
+
+        context = "\n\n".join(blocks)
+        context = truncate_to_token_limit(context, max_tokens, self.session_manager.model)
+        self._repo_code_context_cache = context
+        return self._repo_code_context_cache
+
+    def _build_module_code_context(self, module: Dict[str, Any], max_files: int = 16, max_total_chars: int = 70000) -> str:
+        if self.repo_dir is None or not self.repo_dir.exists():
+            return ""
+
+        raw_paths = module.get("paths", []) if isinstance(module, dict) else []
+        candidate_files: List[Path] = []
+
+        for raw in raw_paths:
+            if not isinstance(raw, str) or not raw.strip():
+                continue
+            rel_path = raw.strip().lstrip("./")
+            abs_path = (self.repo_dir / rel_path).resolve()
+            try:
+                abs_path.relative_to(self.repo_dir.resolve())
+            except Exception:
+                continue
+            if not abs_path.exists():
+                continue
+            if abs_path.is_file():
+                candidate_files.append(abs_path)
+            else:
+                for path in abs_path.rglob("*"):
+                    if not path.is_file():
+                        continue
+                    if any(seg in {"node_modules", "dist", "build", ".venv", "venv", "__pycache__"} for seg in path.parts):
+                        continue
+                    if self._is_probably_text_file(path):
+                        candidate_files.append(path)
+
+        unique_files = []
+        seen = set()
+        for path in candidate_files:
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_files.append(path)
+
+        blocks: List[str] = []
+        total_chars = 0
+        max_tokens = max(1024, int(PROMPT_TOKEN_LIMIT * 0.40))
+        total_tokens = 0
+        for path in unique_files[:max_files * 2]:
+            if len(blocks) >= max_files or total_chars >= max_total_chars or total_tokens >= max_tokens:
+                break
+            snippet = self._read_file_snippet(path)
+            if not snippet:
+                continue
+            rel = path.relative_to(self.repo_dir).as_posix()
+            block = f"### Module File: {rel}\n```text\n{snippet}\n```"
+            if total_chars + len(block) > max_total_chars:
+                break
+            block_tokens = count_tokens(block, self.session_manager.model)
+            if total_tokens + block_tokens > max_tokens:
+                break
+            blocks.append(block)
+            total_chars += len(block)
+            total_tokens += block_tokens
+
+        return truncate_to_token_limit("\n\n".join(blocks), max_tokens, self.session_manager.model)
+
     def _get_default_cwd_catalog(self) -> Dict[str, Any]:
         """Load CWD catalog from file with fallback."""
         catalog_path = Path(CWD_CATALOG_PATH).expanduser() if CWD_CATALOG_PATH else Path(__file__).with_name("cwd_catalog.json")
@@ -769,11 +947,62 @@ class PhasedSecurityAnalyzer:
                     "cwd_id": "CWD-1030",
                     "name": "访问未初始化的指针",
                     "skill_name": "CWD-1030",
+                    "skill_path": "",
                 },
                 {
                     "cwd_id": "CWD-1031",
                     "name": "空指针解引用",
                     "skill_name": "CWD-1031",
+                    "skill_path": "",
                 },
             ],
         }
+
+    def _build_embedded_skill_context(self, cwd_rankings: List[Dict[str, Any]], cwd_catalog: Dict[str, Any]) -> str:
+        """Build skill text context for non-tool backends using catalog skill_path."""
+        if not cwd_rankings:
+            return ""
+
+        catalog_map = {}
+        for item in cwd_catalog.get("cwd_types", []):
+            if isinstance(item, dict):
+                skill_name = str(item.get("skill_name", "")).strip()
+                if skill_name:
+                    catalog_map[skill_name] = item
+
+        blocks = []
+        for rank in cwd_rankings:
+            if not isinstance(rank, dict):
+                continue
+            skill_name = str(rank.get("skill_name", "")).strip()
+            if not skill_name:
+                continue
+
+            catalog_entry = catalog_map.get(skill_name, {})
+            skill_path_value = str(catalog_entry.get("skill_path", "")).strip()
+            if not skill_path_value:
+                blocks.append(f"### Skill: {skill_name}\n未提供 skill_path，无法加载具体技能文档。")
+                continue
+
+            parsed = urlparse(skill_path_value)
+            if parsed.scheme == "file":
+                local_path = Path(parsed.path)
+            else:
+                local_path = Path(skill_path_value).expanduser()
+
+            try:
+                skill_text = local_path.read_text(encoding="utf-8")
+                blocks.append(
+                    f"### Skill: {skill_name}\n"
+                    f"skill_path: {local_path}\n"
+                    f"```text\n{skill_text}\n```"
+                )
+            except Exception as exc:
+                blocks.append(
+                    f"### Skill: {skill_name}\n"
+                    f"skill_path: {local_path}\n"
+                    f"加载失败: {exc}"
+                )
+
+        max_tokens = max(512, int(PROMPT_TOKEN_LIMIT * 0.25))
+        return truncate_to_token_limit("\n\n".join(blocks), max_tokens, self.session_manager.model)

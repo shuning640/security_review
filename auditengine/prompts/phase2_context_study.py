@@ -5,7 +5,9 @@ import json
 
 def get_phase2_context_study_prompt(
     pr_data: dict,
-    phase1_results: Optional[dict] = None
+    phase1_results: Optional[dict] = None,
+    execution_mode: str = "tool_call",
+    repository_code_context: str = "",
 ) -> str:
     """Generate phase-2 prompt for full-repository module decomposition."""
 
@@ -17,6 +19,23 @@ def get_phase2_context_study_prompt(
         architecture_markdown = str(phase1_results.get("architecture_document_markdown", ""))
     if not architecture_markdown:
         architecture_markdown = json.dumps(phase1_results or {}, indent=2, ensure_ascii=False)
+
+    capability_section = ""
+    if execution_mode == "embedded_context":
+        capability_section = f"""
+执行模式：embedded_context（裸模型）
+- 你不具备自主读取仓库文件的能力。
+- 你必须仅基于下方“仓库代码上下文”和 Phase1 文档进行模块拆分。
+- 若证据不足，请保守合并并在 notes 说明。
+
+仓库代码上下文：
+{repository_code_context or "未提供代码上下文。请仅基于已有信息保守输出。"}
+"""
+    else:
+        capability_section = """
+执行模式：tool_call（OpenCode）
+- 你可以通过工具读取仓库文件并补全证据。
+"""
 
     return f"""你是一名资深应用安全工程师，正在对整个代码仓进行阶段化缺陷检测。
 
@@ -30,6 +49,8 @@ def get_phase2_context_study_prompt(
 
 Phase 1 软件设计文档：
 {architecture_markdown}
+
+{capability_section.strip()}
 
 任务要求（先事实后判断，必须两步完成）：
 

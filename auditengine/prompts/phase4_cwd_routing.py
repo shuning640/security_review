@@ -8,7 +8,9 @@ def get_phase4_cwd_routing_prompt(
     pr_data: dict,
     phase2_results: dict,
     phase3_results: dict,
-    cwd_catalog: dict
+    cwd_catalog: dict,
+    execution_mode: str = "tool_call",
+    module_code_context: str = "",
 ) -> str:
     """Generate phase-4 prompt for module × CWD priority routing."""
     repo_name = pr_data.get("head", {}).get("repo", {}).get("full_name", "unknown")
@@ -18,6 +20,22 @@ def get_phase4_cwd_routing_prompt(
     modules_context = json.dumps(modules, indent=2, ensure_ascii=False)
     risks_context = json.dumps(module_risks, indent=2, ensure_ascii=False)
     catalog_context = json.dumps(cwd_catalog, indent=2, ensure_ascii=False)
+
+    capability_section = ""
+    if execution_mode == "embedded_context":
+        capability_section = f"""
+执行模式：embedded_context（裸模型）
+- 你不具备自主读取仓库文件的能力。
+- 你必须仅基于当前提示中的模块信息、风险分析和模块代码上下文进行 CWD 路由。
+
+模块代码上下文：
+{module_code_context or "未提供模块代码上下文。请基于现有证据保守排序。"}
+"""
+    else:
+        capability_section = """
+执行模式：tool_call（OpenCode）
+- 你可以通过工具读取模块相关文件补全 CWD 路由证据。
+"""
 
     return f"""你正在执行模块级安全分析的 Phase 4：CWD 路由规划。
 
@@ -33,6 +51,8 @@ def get_phase4_cwd_routing_prompt(
 
 CWD 分类目录：
 {catalog_context}
+
+{capability_section.strip()}
 
 任务要求：
 1) 仅对当前模块从 CWD 分类目录中选出最需要优先检查的类型。

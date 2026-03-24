@@ -4,7 +4,8 @@
     {
       "cwd_id": "CWD-1031",
       "name": "空指针解引用",
-      "skill_name": "cwd-1031-detection"
+      "skill_name": "cwd-1031-detection",
+      "skill_path": "file:///Users/lsn/.config/opencode/skills/cwd-1031-detection/SKILL.md"
     }
   ]
 }

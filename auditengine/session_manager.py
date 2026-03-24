@@ -6,11 +6,14 @@ import time
 import socket
 import signal
 import subprocess
+import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 from urllib.parse import urlparse
 
 from opencode_ai import Opencode
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage, SystemMessage
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -18,18 +21,28 @@ from auditengine.constants import (
     DEFAULT_MODEL_ID,
     DEFAULT_PROVIDER_ID,
     DEFAULT_TIMEOUT_SECONDS,
+    LLM_BACKEND,
     OPENCODE_API_URL,
     OPENCODE_PORT,
     OPENCODE_SERVER_BIN,
+    OPENAI_API_KEY,
+    OPENAI_BASE_URL,
+    OPENAI_MODEL,
+    PROMPT_TOKEN_LIMIT,
     REPO_PATH,
 )
 from auditengine.logger import get_logger
+from auditengine.token_utils import fit_prompts_to_token_limit
 
 logger = get_logger(__name__)
 
 
 class OpenCodeSessionManager:
     """Manage one OpenCode session lifecycle."""
+
+    backend = "opencode"
+    supports_skill_tools = True
+    supports_skill_trace = True
 
     def __init__(
         self,
@@ -39,6 +52,8 @@ class OpenCodeSessionManager:
         provider_id: str = DEFAULT_PROVIDER_ID,
         port: Optional[int] = None,
     ):
+        from langchain_openai import ChatOpenAI
+
         self.timeout_seconds = timeout_seconds or DEFAULT_TIMEOUT_SECONDS
         self.model = model
         self.provider_id = provider_id
@@ -176,6 +191,8 @@ class OpenCodeSessionManager:
         provider_id: Optional[str] = None,
         tools: Optional[Dict[str, bool]] = None,
     ) -> Dict[str, Any]:
+        from langchain_core.messages import HumanMessage, SystemMessage
+
         if not self.session_id:
             raise ValueError("No active session. Call create_session() first.")
 
@@ -227,6 +244,152 @@ class OpenCodeSessionManager:
         except Exception as exc:
             logger.error(f"Failed to get session info: {exc}")
             return {"error": str(exc)}
+
+    def spawn_sub_session(self) -> "OpenCodeSessionManager":
+        return OpenCodeSessionManager(
+            host=self.host,
+            timeout_seconds=self.timeout_seconds,
+            model=self.model,
+            provider_id=self.provider_id,
+            port=self.port,
+        )
+
+    def __enter__(self):
+        self.create_session()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close_session()
+
+    def __del__(self):
+        try:
+            if not self._closed:
+                self.close_session()
+        except Exception:
+            pass
+
+
+class LangChainSessionManager:
+    """OpenAI-compatible session manager using langchain_openai.ChatOpenAI."""
+
+    backend = "openai_compatible"
+    supports_skill_tools = False
+    supports_skill_trace = False
+
+    def __init__(
+        self,
+        timeout_seconds: Optional[int] = None,
+        model: str = DEFAULT_MODEL_ID,
+        provider_id: str = DEFAULT_PROVIDER_ID,
+        base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+    ):
+        self.timeout_seconds = timeout_seconds or DEFAULT_TIMEOUT_SECONDS
+        self.model = model or OPENAI_MODEL
+        self.provider_id = provider_id
+        self.base_url = base_url or OPENAI_BASE_URL
+        self.api_key = api_key or OPENAI_API_KEY
+        self.session_id: Optional[str] = None
+        self._closed = False
+
+        if not self.model:
+            raise ValueError("OPENAI_MODEL or MODEL_ID must be configured for openai_compatible backend")
+        if not self.base_url:
+            raise ValueError("OPENAI_BASE_URL must be configured for openai_compatible backend")
+        if not self.api_key:
+            raise ValueError("OPENAI_API_KEY must be configured for openai_compatible backend")
+
+        self.client = ChatOpenAI(
+            model=self.model,
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout=self.timeout_seconds,
+        )
+
+    def create_session(self, model: Optional[str] = None, provider_id: Optional[str] = None) -> str:
+        if model is not None:
+            self.model = model
+        if provider_id is not None:
+            self.provider_id = provider_id
+        self.session_id = self.session_id or f"lc_{uuid.uuid4().hex}"
+        return self.session_id
+
+    def send_message(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        model: Optional[str] = None,
+        provider_id: Optional[str] = None,
+        tools: Optional[Dict[str, bool]] = None,
+    ) -> Dict[str, Any]:
+        if not self.session_id:
+            raise ValueError("No active session. Call create_session() first.")
+
+        if model is not None and model != self.model:
+            from langchain_openai import ChatOpenAI
+
+            self.model = model
+            self.client = ChatOpenAI(
+                model=self.model,
+                api_key=self.api_key,
+                base_url=self.base_url,
+                timeout=self.timeout_seconds,
+            )
+        if provider_id is not None:
+            self.provider_id = provider_id
+
+        fit_result = fit_prompts_to_token_limit(
+            system_prompt=system_prompt or "",
+            prompt=prompt,
+            max_prompt_tokens=PROMPT_TOKEN_LIMIT,
+            model=self.model,
+        )
+        if fit_result["trimmed"]:
+            logger.warning(
+                "Prompt exceeds PROMPT_TOKEN_LIMIT=%s; auto-trimmed and continue (tokens: %s -> %s)",
+                PROMPT_TOKEN_LIMIT,
+                fit_result["original_total_tokens"],
+                fit_result["final_total_tokens"],
+            )
+        system_prompt = fit_result["system_prompt"] or None
+        prompt = fit_result["prompt"]
+
+        messages = []
+        if system_prompt:
+            messages.append(SystemMessage(content=system_prompt))
+        messages.append(HumanMessage(content=prompt))
+
+        response = self.client.invoke(messages)
+        response_text = response.content if isinstance(response.content, str) else str(response.content)
+
+        if tools:
+            logger.info("tools parameter is ignored in openai_compatible backend")
+
+        return {
+            "parts": [
+                {
+                    "type": "text",
+                    "text": response_text,
+                }
+            ]
+        }
+
+    def close_session(self) -> bool:
+        self.session_id = None
+        self._closed = True
+        return True
+
+    def get_session_info(self) -> Dict[str, Any]:
+        return {"status": "skill_trace_unavailable", "backend": self.backend}
+
+    def spawn_sub_session(self) -> "LangChainSessionManager":
+        return LangChainSessionManager(
+            timeout_seconds=self.timeout_seconds,
+            model=self.model,
+            provider_id=self.provider_id,
+            base_url=self.base_url,
+            api_key=self.api_key,
+        )
 
     def __enter__(self):
         self.create_session()
@@ -350,28 +513,56 @@ class OpenCodeServerRuntime:
 def get_session_manager(
     host: Optional[str] = None,
     timeout_seconds: Optional[int] = None,
+    model: Optional[str] = None,
+    provider_id: Optional[str] = None,
     port: Optional[int] = None,
-) -> OpenCodeSessionManager:
-    """Factory function for OpenCodeSessionManager."""
+) -> Any:
+    """Factory function for configured LLM session manager."""
+    if LLM_BACKEND == "openai_compatible":
+        return LangChainSessionManager(
+            timeout_seconds=timeout_seconds,
+            model=model or DEFAULT_MODEL_ID,
+            provider_id=provider_id or DEFAULT_PROVIDER_ID,
+        )
+
     return OpenCodeSessionManager(
         host=host,
         timeout_seconds=timeout_seconds,
+        model=model or DEFAULT_MODEL_ID,
+        provider_id=provider_id or DEFAULT_PROVIDER_ID,
         port=port,
     )
+
+
+def get_server_runtime(
+    repo_path: str,
+    host: Optional[str] = None,
+    port: Optional[int] = None,
+) -> Optional[OpenCodeServerRuntime]:
+    """Factory for backend server runtime (opencode only)."""
+    if LLM_BACKEND == "openai_compatible":
+        return None
+    return OpenCodeServerRuntime(repo_path=repo_path, host=host, port=port)
 
 
 if __name__ == "__main__":
     try:
         repo_path = REPO_PATH
         repo_dir = Path(repo_path) if repo_path else Path.cwd()
-        runtime = OpenCodeServerRuntime(repo_path=str(repo_dir))
-        runtime.start()
+        runtime = get_server_runtime(repo_path=str(repo_dir))
+        if runtime is not None:
+            runtime.start()
         with get_session_manager() as manager:
             test_response = manager.send_message("这个项目代码的主要编程语言是什么")
             logger.info(f"Test response: {test_response}")
             info = manager.get_session_info()
-            serializable_history = [x.model_dump(mode="json", warnings=False) for x in info]
+            if isinstance(info, list):
+                serializable_history = [x.model_dump(mode="json", warnings=False) for x in info]
+            else:
+                serializable_history = info
+            logger.debug(f"Session history snapshot: {serializable_history}")
 
-        runtime.stop()
+        if runtime is not None:
+            runtime.stop()
     except Exception as exc:
         logger.error(f"Test failed: {exc}")

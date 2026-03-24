@@ -8,13 +8,15 @@ import json
 import os
 from datetime import datetime
 import sys
+from pathlib import Path
 
 from auditengine.unified_output_manager import UnifiedOutputManager, NoOpOutputManager
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from auditengine.session_manager import OpenCodeSessionManager
-from auditengine.constants import DEFAULT_MODEL_ID, DEFAULT_PROVIDER_ID
+from auditengine.session_manager import get_session_manager
+from auditengine.constants import DEFAULT_MODEL_ID, DEFAULT_PROVIDER_ID, PROMPT_TOKEN_LIMIT, REPO_PATH
 from auditengine.logger import get_logger
 from auditengine.json_parser import parse_json_with_fallbacks
+from auditengine.token_utils import count_tokens, truncate_to_token_limit
 
 logger = get_logger(__name__)
 
@@ -165,7 +167,7 @@ class FindingAnalyzer:
     """分析安全发现集合的类，使用OpenCodeSessionManager进行大模型调用"""
     
     def __init__(self, 
-                 session_manager: OpenCodeSessionManager,
+                 session_manager: Any,
                  output_manager: Optional[UnifiedOutputManager] = None):
         """初始化分析器
         
@@ -194,6 +196,86 @@ class FindingAnalyzer:
 3. 必须输出 keep_finding（true/false）。
 4. 必须严格按照用户提示中指定的格式返回有效JSON。
 5. 不要包含解释文本、Markdown格式或代码块。"""
+
+    @staticmethod
+    def _is_embedded_context_mode(session_manager: Any) -> bool:
+        return str(getattr(session_manager, "backend", "opencode")) == "openai_compatible"
+
+    @staticmethod
+    def _read_context_window(repo_dir: Path, file_path: str, line_no: int, window: int = 60) -> str:
+        abs_path = (repo_dir / file_path.lstrip("./")).resolve()
+        try:
+            abs_path.relative_to(repo_dir.resolve())
+        except Exception:
+            return ""
+        if not abs_path.exists() or not abs_path.is_file():
+            return ""
+
+        try:
+            lines = abs_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except Exception:
+            return ""
+
+        if not lines:
+            return ""
+
+        center = max(1, int(line_no or 1))
+        start = max(1, center - window)
+        end = min(len(lines), center + window)
+
+        numbered = []
+        for idx in range(start, end + 1):
+            numbered.append(f"{idx}: {lines[idx - 1]}")
+        return "\n".join(numbered)
+
+    def _build_findings_code_context(self, findings: List[Dict[str, Any]], pr_context: Optional[Dict[str, Any]]) -> str:
+        repo_path = ""
+        if isinstance(pr_context, dict):
+            repo_path = str(pr_context.get("repo_path", "")).strip()
+        if not repo_path:
+            repo_path = REPO_PATH
+        if not repo_path:
+            return ""
+
+        repo_dir = Path(repo_path).expanduser()
+        if not repo_dir.exists() or not repo_dir.is_dir():
+            return ""
+
+        blocks = []
+        total_chars = 0
+        total_tokens = 0
+        max_total_chars = 60000
+        max_total_tokens = max(1024, int(PROMPT_TOKEN_LIMIT * 0.35))
+        max_items = 30
+
+        for index, finding in enumerate(findings):
+            if index >= max_items or total_chars >= max_total_chars or total_tokens >= max_total_tokens:
+                break
+            file_path = str(finding.get("file", "")).strip()
+            line_no = finding.get("line", 0)
+            if not file_path:
+                continue
+            snippet = self._read_context_window(repo_dir, file_path, int(line_no or 0), window=50)
+            if not snippet:
+                continue
+
+            block = (
+                f"### Finding Index {index}\n"
+                f"file: {file_path}\n"
+                f"line: {line_no}\n"
+                f"```text\n{snippet}\n```"
+            )
+            if total_chars + len(block) > max_total_chars:
+                break
+            block_tokens = count_tokens(block, getattr(self.session_manager, "model", None))
+            if total_tokens + block_tokens > max_total_tokens:
+                break
+            blocks.append(block)
+            total_chars += len(block)
+            total_tokens += block_tokens
+
+        context = "\n\n".join(blocks)
+        return truncate_to_token_limit(context, max_total_tokens, getattr(self.session_manager, "model", None))
     
     def analyze_findings_batch(self,
                                findings: List[Dict[str, Any]],
@@ -206,7 +288,15 @@ class FindingAnalyzer:
         call_id = f"filter_findings_{len(findings)}"
 
         try:
-            prompt = self._generate_batch_findings_prompt(findings, pr_context, custom_filtering_instructions)
+            execution_mode = "embedded_context" if self._is_embedded_context_mode(self.session_manager) else "tool_call"
+            code_context = self._build_findings_code_context(findings, pr_context) if execution_mode == "embedded_context" else None
+            prompt = self._generate_batch_findings_prompt(
+                findings,
+                pr_context,
+                custom_filtering_instructions,
+                code_context=code_context,
+                execution_mode=execution_mode,
+            )
             system_prompt = self._generate_system_prompt()
             self.output_manager.save_text(
                 f"{call_id}_prompt.txt",
@@ -266,7 +356,9 @@ class FindingAnalyzer:
     def _generate_batch_findings_prompt(self,
                                         findings: List[Dict[str, Any]],
                                         pr_context: Optional[Dict[str, Any]] = None,
-                                        custom_filtering_instructions: Optional[str] = None) -> str:
+                                        custom_filtering_instructions: Optional[str] = None,
+                                        code_context: Optional[str] = None,
+                                        execution_mode: str = "tool_call") -> str:
         """生成用于批量分析安全发现的提示词。"""
         pr_info = ""
         if pr_context and isinstance(pr_context, dict):
@@ -299,14 +391,33 @@ PR上下文:
             filtering_section = custom_filtering_instructions
         else:
             filtering_section = """ 排除检测出来的测试部分等和生产业务不相关的缺陷 """
+
+        capability_section = ""
+        if execution_mode == "embedded_context":
+            capability_section = f"""
+执行模式：embedded_context（裸模型）
+- 你不具备自主读取仓库文件的能力。
+- 你必须仅基于下方“代码上下文片段”做真实性与风险评估。
+- 若证据不足，请将 keep_finding 设为 false 并在 justification 说明缺失证据。
+
+代码上下文片段：
+{code_context or "未提供代码上下文。请仅基于已给证据保守判断。"}
+"""
+        else:
+            capability_section = """
+执行模式：tool_call（OpenCode）
+- 你可以根据 file/line 自行查找相关文件、上下文与调用链后再判断。
+"""
+
         return f"""我需要你批量分析来自自动化代码审计的安全发现，并确定哪些应被过滤。
 
 {pr_info}
 
 输入说明：
 - 每条发现都包含 file 路径和 line 信息。
-- 你必须根据这些路径自行查找相关文件、上下文与调用链后再判断。
-- 不要依赖我手工提供文件内容；请基于代码库真实上下文做决定。
+- 请基于代码证据和调用链做真实性判断。
+
+{capability_section.strip()}
 
 排除规则：
 {filtering_section}
@@ -370,7 +481,7 @@ class FindingsFilter:
                  host: Optional[str] = None,
                  timeout_seconds: Optional[int] = None,
                  output_manager: Optional[UnifiedOutputManager] = None,
-                 external_session_manager: Optional[OpenCodeSessionManager] = None):
+                 external_session_manager: Optional[Any] = None):
         """Initialize findings filter.
         
         Args:
@@ -403,11 +514,11 @@ class FindingsFilter:
                     logger.info("使用外部传入的OpenCode Session Manager")
                 else:
                     # Create new session manager
-                    self.session_manager = OpenCodeSessionManager(
+                    self.session_manager = get_session_manager(
                         host=host,
                         model=model,
                         provider_id=provider_id,
-                        timeout_seconds=timeout_seconds
+                        timeout_seconds=timeout_seconds,
                     )
                     
                     # Create session if not exists

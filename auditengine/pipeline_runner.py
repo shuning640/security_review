@@ -6,11 +6,21 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from auditengine.constants import OPENCODE_SERVER_BIN, SUBPROCESS_TIMEOUT
+from auditengine.constants import (
+    DEFAULT_MODEL_ID,
+    LLM_BACKEND,
+    OPENCODE_SERVER_BIN,
+    OPENAI_API_KEY,
+    OPENAI_BASE_URL,
+    OPENAI_MODEL,
+    PROMPT_TOKEN_LIMIT,
+    SUBPROCESS_TIMEOUT,
+)
 from auditengine.json_parser import parse_json_with_fallbacks
 from auditengine.logger import get_logger
 from auditengine.phased_analyzer import PhasedSecurityAnalyzer
-from auditengine.session_manager import OpenCodeServerRuntime, OpenCodeSessionManager
+from auditengine.session_manager import get_server_runtime, get_session_manager
+from auditengine.token_utils import fit_prompts_to_token_limit
 from auditengine.unified_output_manager import UnifiedOutputManager
 
 logger = get_logger(__name__)
@@ -29,7 +39,7 @@ class SimpleAuditRunner:
         self,
         repo_dir: Path,
         pr_data: Dict[str, Any],
-        session_manager: Optional[OpenCodeSessionManager] = None,
+        session_manager: Optional[Any] = None,
         output_manager: Optional[UnifiedOutputManager] = None,
     ) -> Tuple[bool, str, Dict[str, Any]]:
         if not repo_dir.exists():
@@ -39,9 +49,10 @@ class SimpleAuditRunner:
         local_server_runtime = None
         if session_manager is None:
             try:
-                local_server_runtime = OpenCodeServerRuntime(repo_path=str(repo_dir))
-                local_server_runtime.start()
-                session_manager = OpenCodeSessionManager(timeout_seconds=self.timeout_seconds)
+                local_server_runtime = get_server_runtime(repo_path=str(repo_dir))
+                if local_server_runtime is not None:
+                    local_server_runtime.start()
+                session_manager = get_session_manager(timeout_seconds=self.timeout_seconds)
                 session_needs_close = True
                 logger.info("为分阶段分析创建临时session")
             except Exception as e:
@@ -88,6 +99,9 @@ class SimpleAuditRunner:
     def run_security_audit(self, repo_dir: Path, prompt: str) -> Tuple[bool, str, Dict[str, Any]]:
         if not repo_dir.exists():
             return False, f"Repository directory does not exist: {repo_dir}", {}
+
+        if LLM_BACKEND == "openai_compatible":
+            return self._run_security_audit_openai(prompt)
 
         prompt_size = len(prompt.encode("utf-8"))
         if prompt_size > 1024 * 1024:
@@ -162,6 +176,51 @@ class SimpleAuditRunner:
         except Exception as e:
             return False, f"Analysis runtime execution error: {str(e)}", {}
 
+    def _run_security_audit_openai(self, prompt: str) -> Tuple[bool, str, Dict[str, Any]]:
+        try:
+            from langchain_openai import ChatOpenAI
+            from langchain_core.messages import HumanMessage
+        except Exception as exc:
+            return False, f"langchain_openai not available: {exc}", {}
+
+        if not OPENAI_BASE_URL or not OPENAI_API_KEY:
+            return False, "OPENAI_BASE_URL and OPENAI_API_KEY are required in openai_compatible backend", {}
+
+        model_name = OPENAI_MODEL or DEFAULT_MODEL_ID
+        if not model_name:
+            return False, "OPENAI_MODEL or MODEL_ID must be configured in openai_compatible backend", {}
+
+        try:
+            fit_result = fit_prompts_to_token_limit(
+                system_prompt="",
+                prompt=prompt,
+                max_prompt_tokens=PROMPT_TOKEN_LIMIT,
+                model=model_name,
+            )
+            if fit_result["trimmed"]:
+                logger.warning(
+                    "Prompt exceeds PROMPT_TOKEN_LIMIT=%s; auto-trimmed and continue (tokens: %s -> %s)",
+                    PROMPT_TOKEN_LIMIT,
+                    fit_result["original_total_tokens"],
+                    fit_result["final_total_tokens"],
+                )
+            prompt = fit_result["prompt"]
+
+            client = ChatOpenAI(
+                model=model_name,
+                api_key=OPENAI_API_KEY,
+                base_url=OPENAI_BASE_URL,
+                timeout=self.timeout_seconds,
+            )
+            response = client.invoke([HumanMessage(content=prompt)])
+            content = response.content if isinstance(response.content, str) else str(response.content)
+            success, parsed_result = parse_json_with_fallbacks(content, "openai compatible output")
+            if not success:
+                return False, "Failed to parse openai_compatible output", {}
+            return True, "", self._extract_security_findings(parsed_result)
+        except Exception as exc:
+            return False, f"openai_compatible execution error: {exc}", {}
+
     def _extract_security_findings(self, runtime_output: Any) -> Dict[str, Any]:
         if isinstance(runtime_output, dict):
             if "findings" in runtime_output:
@@ -195,6 +254,15 @@ class SimpleAuditRunner:
         }
 
     def validate_runtime_available(self) -> Tuple[bool, str]:
+        if LLM_BACKEND == "openai_compatible":
+            if not OPENAI_BASE_URL:
+                return False, "OPENAI_BASE_URL is required for openai_compatible backend"
+            if not OPENAI_API_KEY:
+                return False, "OPENAI_API_KEY is required for openai_compatible backend"
+            if not OPENAI_MODEL and not DEFAULT_MODEL_ID:
+                return False, "OPENAI_MODEL or MODEL_ID is required for openai_compatible backend"
+            return True, ""
+
         try:
             result = subprocess.run(
                 [OPENCODE_SERVER_BIN, "--version"],
