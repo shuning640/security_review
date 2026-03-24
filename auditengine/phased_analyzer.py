@@ -18,7 +18,7 @@ from auditengine.prompts import (
 )
 from auditengine.session_manager import OpenCodeSessionManager
 from auditengine.unified_output_manager import UnifiedOutputManager, NoOpOutputManager
-from auditengine.constants import PHASE_PARALLELISM
+from auditengine.constants import CWD_CATALOG_PATH, PHASE_PARALLELISM
 
 logger = get_logger(__name__)
 
@@ -752,7 +752,7 @@ class PhasedSecurityAnalyzer:
 
     def _get_default_cwd_catalog(self) -> Dict[str, Any]:
         """Load CWD catalog from file with fallback."""
-        catalog_path = Path(__file__).with_name("cwd_catalog.json")
+        catalog_path = Path(CWD_CATALOG_PATH).expanduser() if CWD_CATALOG_PATH else Path(__file__).with_name("cwd_catalog.json")
         try:
             with open(catalog_path, "r", encoding="utf-8") as f:
                 parsed = json.load(f)

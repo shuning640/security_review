@@ -75,6 +75,7 @@ PR_NUMBER = _get_str("PR_NUMBER")
 REPO_PATH = _get_str("REPO_PATH")
 REPO_NAME = _get_str("REPO_NAME")
 OUTPUT_DIR = _get_str("OUTPUT_DIR")
+CWD_CATALOG_PATH = _get_str("CWD_CATALOG_PATH")
 RUNTIME_USER = _get_str("USER", "system")
 
 # Exit Codes
