@@ -13,6 +13,7 @@ def get_phase2_context_study_prompt(
     repo_path = pr_data.get("repository_path", "unknown")
     total_files = pr_data.get("changed_files", 0)
     file_tree_with_loc = str(pr_data.get("repository_file_tree_with_loc", "")).strip()
+    directory_relation_sentences = str(pr_data.get("directory_relation_sentences", "")).strip()
     feature_list_markdown = ""
     if isinstance(phase1_results, dict):
         feature_list_markdown = str(phase1_results.get("architecture_document_markdown", ""))
@@ -20,6 +21,13 @@ def get_phase2_context_study_prompt(
         feature_list_markdown = json.dumps(phase1_results or {}, indent=2, ensure_ascii=False)
     if not file_tree_with_loc:
         file_tree_with_loc = "unknown"
+
+    relation_section = ""
+    if directory_relation_sentences:
+        relation_section = f"""
+目录关系信息（辅助参考）：
+{directory_relation_sentences}
+"""
 
     return f"""你是一名资深应用安全工程师，正在对整个代码仓进行阶段化缺陷检测。
 
@@ -36,6 +44,8 @@ Phase 1 功能清单：
 
 项目文件树（带代码行数）：
 {file_tree_with_loc}
+
+{relation_section}
 
 任务要求：
 1) 根据 Phase 1 的功能清单拆分最终模块（modules），优先保持功能内聚。
@@ -58,7 +68,7 @@ Phase 1 功能清单：
 - 严禁虚构：只引用可在仓库中定位到的路径，不允许在 modules 中新增完全无证据来源的路径。
 
 规模约束：
-- 每个模块聚合后的代码行数应尽量控制在 3,000 到 60,000 行。
+- 每个模块聚合后的代码行数应尽量控制在 3,000 到 30,000 行。
 - 每个模块文件数应保持在可维护范围；文件数显著偏大的模块必须继续拆分。
 - 当 LOC 与文件数约束冲突时，优先保证功能内聚与边界清晰。
 

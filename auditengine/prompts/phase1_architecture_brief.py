@@ -9,9 +9,17 @@ def get_phase1_architecture_brief_prompt(
     repo_path = pr_data.get("repository_path", "unknown")
     total_files = pr_data.get("changed_files", 0)
     file_tree_with_loc = str(pr_data.get("repository_file_tree_with_loc", "")).strip()
+    directory_relation_sentences = str(pr_data.get("directory_relation_sentences", "")).strip()
 
     if not file_tree_with_loc:
         file_tree_with_loc = "unknown"
+
+    relation_section = ""
+    if directory_relation_sentences:
+        relation_section = f"""
+目录关系信息：
+{directory_relation_sentences}
+"""
 
     return f"""你是一名资深软件架构师，正在执行阶段化安全检测流程的 Phase 1：项目功能清单生成。
 
@@ -23,6 +31,8 @@ def get_phase1_architecture_brief_prompt(
 
 项目文件树（带代码行数）：
 {file_tree_with_loc}
+
+{relation_section}
 
 目标：
 仅生成可用于后续模块划分的“功能清单”。

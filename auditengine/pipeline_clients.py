@@ -1,5 +1,6 @@
 """Clients used by pipeline workflows."""
 
+import json
 import os
 import re
 from pathlib import Path
@@ -7,7 +8,12 @@ from typing import Any, Dict, List
 
 import requests
 
-from auditengine.constants import EXCLUDE_DIRECTORIES, GITHUB_TOKEN, RUNTIME_USER
+from auditengine.constants import (
+    DIRECTORY_RELATION_FILE_PATH,
+    EXCLUDE_DIRECTORIES,
+    GITHUB_TOKEN,
+    RUNTIME_USER,
+)
 from auditengine.logger import get_logger
 from auditengine.repo_tree_builder import build_project_file_tree_with_loc
 
@@ -144,12 +150,46 @@ class RepositoryScopeClient:
 
         return False
 
+    def _load_directory_relation_sentences(self, repo_dir: Path) -> str:
+        relation_file_path = DIRECTORY_RELATION_FILE_PATH
+        if not relation_file_path:
+            return ""
+
+        relation_path = Path(relation_file_path).expanduser()
+        if not relation_path.is_absolute():
+            relation_path = repo_dir / relation_path
+
+        if not relation_path.exists() or not relation_path.is_file():
+            logger.warning(f"DIRECTORY_RELATION_FILE_PATH is invalid: {relation_path}")
+            return ""
+
+        try:
+            content = relation_path.read_text(encoding="utf-8")
+            payload = json.loads(content)
+        except Exception as exc:
+            logger.warning(f"Failed to parse directory relation file {relation_path}: {exc}")
+            return ""
+
+        relation_sentences = payload.get("directoryRelationSentences") if isinstance(payload, dict) else None
+        if isinstance(relation_sentences, str):
+            return relation_sentences.strip()
+
+        if isinstance(relation_sentences, list):
+            lines = [str(item).strip() for item in relation_sentences if str(item).strip()]
+            return "\n".join(lines)
+
+        logger.warning(
+            f"directoryRelationSentences is missing or invalid in relation file: {relation_path}"
+        )
+        return ""
+
     def get_full_repo_data(self, repo_dir: Path, repo_name: str) -> Dict[str, Any]:
         files: List[Dict[str, Any]] = []
         repository_file_tree_with_loc = build_project_file_tree_with_loc(
             repo_dir=repo_dir,
             is_excluded=self._is_excluded,
         )
+        directory_relation_sentences = self._load_directory_relation_sentences(repo_dir)
 
         for root, _, filenames in os.walk(repo_dir):
             root_path = Path(root)
@@ -188,5 +228,6 @@ class RepositoryScopeClient:
             "changed_files": len(files),
             "repository_path": str(repo_dir),
             "repository_file_tree_with_loc": repository_file_tree_with_loc,
+            "directory_relation_sentences": directory_relation_sentences,
             "scan_scope": "full_repository",
         }
