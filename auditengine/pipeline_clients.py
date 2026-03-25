@@ -9,6 +9,7 @@ import requests
 
 from auditengine.constants import EXCLUDE_DIRECTORIES, GITHUB_TOKEN, RUNTIME_USER
 from auditengine.logger import get_logger
+from auditengine.repo_tree_builder import build_project_file_tree_with_loc
 
 logger = get_logger(__name__)
 
@@ -145,6 +146,10 @@ class RepositoryScopeClient:
 
     def get_full_repo_data(self, repo_dir: Path, repo_name: str) -> Dict[str, Any]:
         files: List[Dict[str, Any]] = []
+        repository_file_tree_with_loc = build_project_file_tree_with_loc(
+            repo_dir=repo_dir,
+            is_excluded=self._is_excluded,
+        )
 
         for root, _, filenames in os.walk(repo_dir):
             root_path = Path(root)
@@ -182,5 +187,6 @@ class RepositoryScopeClient:
             "deletions": 0,
             "changed_files": len(files),
             "repository_path": str(repo_dir),
+            "repository_file_tree_with_loc": repository_file_tree_with_loc,
             "scan_scope": "full_repository",
         }

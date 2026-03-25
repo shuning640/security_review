@@ -5,3 +5,4 @@ __pycache__/
 claudecode/__pycache__/
 claudecode/prompts/__pycache__/
 example/
+test/
